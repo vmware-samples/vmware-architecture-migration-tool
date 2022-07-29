@@ -1,0 +1,7 @@
+﻿vmname,target_hostpoolcluster,target_portgroup,target_datastore
+candidatevm1,NewCluster,VLAN-16,DatastoreCluster
+candidatevm2,NewCluster,VLAN-16,NFS02
+candidatevm3,resourcePool1,VLAN-16,NFS02
+candidatevm4,OtherCluster,Nested-VLAN-16,NFS01
+candidatevm5,OtherCluster,LS-10.1.102.X/24,NFS02
+candidatevm6,esx01.corp.local,VM Network,NFS01
