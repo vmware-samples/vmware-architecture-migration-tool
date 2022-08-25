@@ -251,7 +251,7 @@ $scriptVars = (Get-Variable -Scope Script -Include "vamt*")
 
 #Pre-Create log dir
 if(!(Test-Path $vamtLoggingDirectory)){
-    Write-Host "Logging directory for current execution ($vamtLoggingDirectory) was not found. Creating directory now. - $(Get-Date)" -foregroundColor Cyan
+    Write-Host "Creating logging directory for current execution ($vamtLoggingDirectory). - $(Get-Date)" -foregroundColor Cyan
     New-Item -Path $vamtLoggingDirectory -ItemType Directory -Force | Out-Null
 }
 #Stop any hanging transcripts

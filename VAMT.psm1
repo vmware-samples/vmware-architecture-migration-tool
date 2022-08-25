@@ -89,7 +89,7 @@ function Save-Credential {
     $credFile = "$credentialDirectory\$credName-$($env:USERNAME).cred"
     Write-Log -severityLevel Debug -logMessage "Preparing to set credential for '$credName'."
     if ($null -eq $cred) {
-        $cred = Get-Credential -Message "Please enter the credentials to use for connections to '$credName'. Recommended Username format: user@domain" -credentialDirectory $credentialDirectory
+        $cred = Get-Credential -Message "Please enter the credentials to use for connections to '$credName'. Recommended Username format: user@domain"
     }
     $cred | Export-Clixml -Path $credFile
     Write-Log -severityLevel Info -logMessage "Saved new credential for '$credName'. User: '$($cred.UserName)'"
