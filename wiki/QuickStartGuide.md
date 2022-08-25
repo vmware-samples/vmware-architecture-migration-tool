@@ -1,20 +1,19 @@
-# VMware Architecture Migration Tool (VAMT)<br>Quick Start Guide (cheat sheet with example)
+# VMware Architecture Migration Tool (VAMT)<br>Quick Start Guide (with examples)
 ---
-The VMWare Architecture Migration Tool (VAMT) is a PowerShell script that uses the VMWare PowerCLI extension commands to enable moving a VM from one hardware architecture (for instance Intel) to a different hardware architecture (for instance AMD).
+The VMWare Architecture Migration Tool (VAMT) is a PowerShell script that uses VMWare PowerCLI to enable moving a VM from one hardware architecture (for instance Intel) to a different hardware architecture (for instance AMD).
 
 There are some constraints and guidelines for this VM movement that are outlined in the full [Script User's Guide](./Script_Usage.md). The User's Guide covers more of the functional details for the runtime usage of the script and should be referred to for more thorough documentation. This Quick Start guide is intended to be a cheat sheet showing an example of the script usage that was captured during initial testing.
 
 # Prerequisites
-There are several prerequisites that need to be completed before the VAMT script can run. Some of these prerequisites are in the vCenter settings while others are environmental ecosystem items. For more detailed documentation around the prerequisites, see the [Script Prerequisites](./Script_Prerequisites.md). A basic list of these are shown below.
+There are several prerequisites that need to be completed before the VAMT script can executed. Some of these prerequisites are in the vCenter settings while others are environmental ecosystem items. For more detailed documentation around the prerequisites, see the [Script Prerequisites](./Script_Prerequisites.md). A basic list of these are shown below.
 
-- Host system capable of running Windows PowerShell scripts as administrator
+- Host system capable of executing Windows PowerShell scripts as administrator
 - Host system VMware PowerCLI installed in PowerShell (see one of the following links)
 [Installing VMware PowerCLI](https://docs.vmware.com/en/VMware-vSphere/7.0/com.vmware.esxi.install.doc/GUID-F02D0C2D-B226-4908-9E5C-2E783D41FE2D.html) or [PowerCLI Installation Guide](https://developer.vmware.com/powercli/installation-guide)
 - Administrator credentials on instance of the vcenter holding the clusters where the VMs live that are to be migrated
 - Host system must have access to the vcenter where the VMs live
 - Access to VAMT source repo:
-	> Dev repo link (temporary): [Dev Repo](https://github.com/austinbrowder/vamt_dir)
-	> Public repo link: **TODO: Remove above and insert public repo link here once it is set up**
+	> Public repo link: [VMware Architecture Migration Tool](https://github.com/vmware-samples/vmware-architecture-migration-tool)
 - If Distributed Resource Scheduler (DRS) is part of your vcenter, then it must be enabled on the clusters being migrated from and to 
 	> 1) Navigate to cluster
 [Link to Enabling VMware DRS from vSphere documentation](https://docs.vmware.com/en/VMware-vSphere/6.7/com.vmware.vsphere.mscs.doc/GUID-C228FA54-F621-45DA-8D62-AD8C118C89C0.html)
@@ -86,7 +85,6 @@ WARNING: The 'Parent' property of Snapshot type is deprecated. Use the 'ParentSn
 # Migration
 
 ## 1) Pull vamt_dir git repository down to the execution host
-**TODO: Change link to public repo in example**<br>
 ***Example repo clone:***
 ```
 user@MYSYSTEM:/vmtest$ git clone git@github.com:vmware-samples/vmware-architecture-migration-tool.git
@@ -107,24 +105,19 @@ Set-PowerCLIConfiguration -DisplayDeprecationWarnings:$false -Scope User
 
 ## 3) Add required single cardinality VM tags in vSphere category VAMT. These tags are used to drive the migration and/or rollback process.
 
-**NOTE: The VAMT category and required tags can also be programmatically set up using the approach shown in the example script at:**
-**TODO: Replace with permanent repo link to script once it is moved over to public repo**
-
-[Link to tag setup script source](../VMwareArchitectureMigrationTool.ps1#L141)
-
-**TODO: Replace with permanent repo link**
+**NOTE: The VAMT category and required tags can also be programmatically set up using PowerCLI.**
 
 > 3.1) Get most recent list of tags required for the migration process from the script source:
-[Link to list of migration tags in source](../VMwareArchitectureMigrationTool.ps1#L141)
+[Link to list of migration tags in source](../VMwareArchitectureMigrationTool.ps1#L152)
 ```
-vamtTagCatName = "VAMT"
-vamtReadyTagName = "readyToMigrate"
-vamtInProgressTagName = "inProgress"
-vamtCompleteTagName = "complete"
-vamtCompleteWithErrorsTagName = "completeWithErrors"
-vamtFailedTagName = "failed"
-vamtReadyToRollbackTagName = "readyToRollback"
-vamtRollbackTagName = "rolledBack"
+tagCatName = "VAMT"
+readyTagName = "readyToMigrate"
+inProgressTagName = "inProgress"
+completeTagName = "complete"
+completeWithErrorsTagName = "completeWithErrors"
+failedTagName = "failed"
+readyToRollbackTagName = "readyToRollback"
+rollbackTagName = "rolledBack"
 ```
 
 > 3.2) Create the VAMT tag category, using the "Tags & Custom Attributes" window off the main "Menu" pulldown
@@ -138,11 +131,10 @@ Once this tag category is created as shown above, save this for use with the nex
 ![Create VAMT Tag Category](./images/VAMT-SettingUpTags_4.jpg)
 
 ## 4) Create list of VMs to migrate in .csv format
-**TODO: change link to public repo**
 
 [Example CSV file](../example/toMigrate.csv)
 
-For this captured run through example, the following set of values was used in a file called "toMigrate.csv", much like the one shown in the link above:
+For this captured example runthrough, the following set of values was used in a file called "toMigrate.csv", much like the one shown in the link above:
 ```
 vmname,target_hostpoolcluster,target_portgroup,target_datastore
 Win2012r2-1,green,VLAN819-Green,Green
@@ -153,8 +145,7 @@ Win2012r2-5,green,VLAN819-Green,Green
 ```
 
 ## 5) Set up helper for for script execution
-**TODO: add link from public repo for this file**
-The TestMigrate PS script example below shows one way that the options can be customized and used to invoke the migration script. It is the approach that was executed for collecting the screenshots throughout the following examples. However this is just one approach, see the script for other ways to invoke and execute the migration. This options shell variable hash table can be used, or alternatively you can pass options in as list of command line arguments.
+The TestMigrate.ps1 PowerShell script example below shows one way that the options hash table can be customized and used to invoke the migration script.  You can also embed the hash table setup in to other scripts or calls from your own tooling, set these variables up as part of a separate script, or you can pass the various options in as list of command line arguments to the migration script itself.  This is the approach that was executed for collecting the screenshots throughout the following examples, however this is just one approach.
 
 *TestMigrate.ps1*
 ```
@@ -166,7 +157,7 @@ The TestMigrate PS script example below shows one way that the options can be cu
 $options = @{
 	action = "migrate"
 	vcenters = "a.b.c.d"
-	inputFilePath = ".\toMigrate.csv"
+	inputFilePath = ".\example\toMigrate.csv"
 	changeWindowStart = "7/11/2022 13:16:58"
 	changeWindowDuration = 0
 	parallelTaskCount = 5
@@ -182,7 +173,9 @@ $options = @{
 .\VMwareArchitectureMigrationTool.ps1 @options
 ```
 
-This helper script can be ran from anywhere the VAMT script itself and the .csv file containing the list of VMs exist, but I found it convenient to execute them from the root of the vamt_dir repo after cloning it down from git:
+This helper script can be run from anywhere [VMwareArchitectureMigrationTool.ps1](../VMwareArchitectureMigrationTool.ps1), [VAMT.psm1](../VAMT.psm1), and the migration targets inputs .csv file ([Example CSV file](../example/toMigrate.csv)) exist. A convenient location to execute the script is from the root of the repo after cloning it down from git. 
+
+Example:
 ```
 PS C:\Users\admin\Test\vamt_dir> dir
   Directory: C:\Users\admin\Test\vamt_dir
@@ -193,13 +186,11 @@ LastWriteTime     Length  Name
 7/14/2022  2:53 PM  .    wiki
 7/6/2022  4:10 PM  15    .gitignore
 7/11/2022 12:41 PM  528   README.md
-7/15/2022  4:07 PM  1282   TestMigrate.ps1
-7/17/2022  7:03 PM  260   toMigrate.csv
+7/17/2022  7:03 PM  260   VAMT.psm1
 7/15/2022  3:23 PM  103801  VMwareArchitectureMigrationTool.ps1
 ```
 
 ## 6) Clean up any existing VAMT tags and add the readyToMigrate VAMT tag to all VMs to be migrated
-**TODO: link for the example script that changes these programmatically**
 
 The next thing to do is to set the tags up to be ready for migration in vcenter. As in the other examples in this document, this can be automated using an approach outlined in the example script shown above, however this cheat sheet shows how it is done in the vSphere UI.
 
@@ -221,21 +212,25 @@ In this example, the 5 VMs are going to be migrated from the blue cluster shown 
 ![Pre-migration in vSphere](./images/VAMT-MigrateVMs_1.jpg)
 
 > 7.1) Open up a PowerShell window on the execution host
+
 As described in the prerequisites and setup, PowerCLI must be installed and the execution host needs network access to the vcenter as well as administrator credentials.
 
 ![Open PowerShell / PowerCLI window](./images/VAMT-MigrateVMs_2.jpg)
 
 > 7.2) Execute the migration using the helper script
+
 If all is set up properly, the script will then shut down the VMs and begin migrating them to the other cluster architecture.
 
 ![Execute migration](./images/VAMT-MigrateVMs_3.jpg)
 
 > 7.3) Check migration is in progress in vcenter between the architectures (Intel to AMD, in this case)
-As the migration runs, you should see the VM tasks running in vsphere
+
+As the migration executes, you should see the VM tasks running in the vsphere task window
 
 ![Check migration is running](./images/VAMT-MigrateVMs_4.jpg)
 
-> 7.3) Check migration status once complete
+> 7.4) Check migration status once complete
+
 Once the migration is complete, you will get a status summary about the migration. Any errors encountered along the way are logged as well.
 
 ```
@@ -285,7 +280,7 @@ And as an additional validation, you can examine the final state of each VM. You
 ![Verify state of VMs](./images/VAMT-MigrateVMs_6.jpg)
 
 # Rollback
-VMs can be rolled back from the migrated cluster at any point in time after a migration operation is complete. Rollback basically can be thought of as a reverse migration from the target cluster that the VM was migrated to, back to the original cluster it started with.
+VMs can be rolled back from the migrated cluster at any point in time after a migration operation is complete. Rollback basically can be thought of as a reverse migration, going from the target cluster that the VM was migrated to back to the original cluster it started in.
 
 Once a migration has been completed, there is information stored in the custom attributes along with a snapshot that was taken for that VM:
 ![Rollback snapshot](./images/VAMT-RollbackVMs_1.jpg)
@@ -301,7 +296,7 @@ $options = @{
 }
 ```
 ## 2) Verify the VMs you want to rollback in the input .csv file
-Note that while the input argument file containing the list of VMs to roll back is the same, only the VM name itself is actually used by the script from the migration .csv file during a rollback. All of the other information needed for the rollback comes from the custom attributes and snapshot. However the other fields for cluster, network, and datastore can safely be left in there, as shown in the example below, they just won't be used during a rollback.
+Note that while the input argument file will contain the list of VMs to roll back in the same way as with migration, only the VM name itself is actually used by the script from the migration .csv file during the rollback. All of the other information needed for the rollback comes from the custom attributes and snapshot data shown above. The other fields for cluster, network, and datastore can safely be left in there, as shown in the example, they just won't be used during the rollback.  Instead, the information that was stored as part of the snapshot and custom attributes when the migration was done is used for the cluster, network, and datastore.
 ```
 vmname,target_hostpoolcluster,target_portgroup,target_datastore
 Win2012r2-1,blue,VLAN819-Blue,Blue
@@ -360,7 +355,7 @@ At this point, the rollback should show in progress in vcenter, much the same as
 ![Set readyToRollback VAMT tag on VMs you want to roll back](./images/VAMT-RollbackVMs_3.jpg)
 
 ## 5) Verify the rollback once completed
-Once the rollback has completed, you should receive the same type operation status summary as with migration:
+Once the rollback has completed, you should receive the same type of operation status summary as received with migration:
 ```
 [Info] 07/19/2022 10:43:00 - Preparing to set 'complete' tag on 'Win2012r2-1'
 [Info] 07/19/2022 10:43:00 - Successfully to set 'complete' tag on 'Win2012r2-1'
@@ -401,3 +396,16 @@ test_net_1 VLAN819-Green Successfully rolled back VM 'Win2012r2-5'.
 [Info] 07/19/2022 10:43:30 - Preparing to send final status email.
 ```
 As with the migration example, you can also validate the rollback via vcenter or via PowerCLI script calls to read the VM state.
+
+# Cleanup
+Once migration and/or rollback operations are completed, the cleanup operation can be used to remove the snapshots and custom attributes that were stored during their execution.
+
+As you can see from the migration and rollback operation examples, the snapshots that are created may tend to accrue on the system over time; on large deployments these represent wasted space.  The job of the cleanup operation action is to clean these snapshots up, remove any VAMT tags, and remove the custom attributes that were set up once the migration and/or rollback operations are completed.
+
+![Set readyToRollback VAMT tag on VMs you want to roll back](./images/VAMT-CleanupVMs_1.jpg)
+
+As mentioned before, the rollback and cleanup execution mechanisms are virtually identical to migration; the simplest approach to cleaning up is to replace the operation action in the input @options with “cleanup” action and they use the same .CSV file as input.
+
+![Set readyToRollback VAMT tag on VMs you want to roll back](./images/VAMT-CleanupVMs_2.jpg)
+
+For cleanup, however, as with rollback, only the VM names in the input .CSV file are used; the cluster/host, network, and datastore are ignored, and the required cleanup information comes from the snapshot and custom attributes.

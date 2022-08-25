@@ -77,3 +77,4 @@ In order to execute the VAMT there are configuration steps required in vCenter a
 ## Source Code
 
 * Pull the [VMwareArchitectureMigrationTool.ps1](../VMwareArchitectureMigrationTool.ps1) script down to a location where you have read/write access on your Windows OS.
+* Pull the [VAMT.psm1](../VAMT.psm1) module down to the same directory where [VMwareArchitectureMigrationTool.ps1](../VMwareArchitectureMigrationTool.ps1) sits.
