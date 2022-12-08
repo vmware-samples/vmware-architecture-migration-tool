@@ -108,11 +108,11 @@ function Write-Log {
         [ValidateSet('Info','Warn','Debug','Error')]
         [string]$severityLevel = 'Info',
 
-        [Parameter(Mandatory)]
+        [Parameter()]
         [ValidateNotNullOrEmpty()]
         [String]$logDir,
 
-        [Parameter(Mandatory)]
+        [Parameter()]
         [ValidateNotNullOrEmpty()]
         [String]$logFileNamePrefix,
 
@@ -122,7 +122,10 @@ function Write-Log {
         [Parameter()]
         [Int]$syslogPort,
 
-        [Parameter()]
+        [Parameter()] <#@{
+            'Write-Log:logDir' = 'C:\logs'
+            'Write-Log:logFileNamePrefix' = 'Migrate'
+        }#>
         [Object]$logDefaults,
 
         [Parameter()]
@@ -172,14 +175,15 @@ function Write-Log {
     if ($logToConsole) {
         Write-Host $stampedlogMessage -foregroundColor $foregroundColor
     }
-    Add-Content -Path "$logDir/$($logFileNamePrefix)_Script_Log.log" -value $stampedlogMessage
-    
-    if ($severityLevel -eq "Error") {
-        Add-content -Path "$logDir/$($logFileNamePrefix)_Error_Log.log" -value $stampedlogMessage
+
+    if (![string]::IsNullOrEmpty($logDir) -and ![string]::IsNullOrEmpty($logFileNamePrefix)) {
+        Add-Content -Path "$logDir/$($logFileNamePrefix)_Script_Log.log" -value $stampedlogMessage
+        if ($severityLevel -eq "Error") {
+            Add-content -Path "$logDir/$($logFileNamePrefix)_Error_Log.log" -value $stampedlogMessage
+        }
     }
 
     if (![string]::IsNullOrEmpty($syslogServer)) {
-        
         $params = @{}
         $params.syslogServer = $syslogServer
         $params.syslogPort = $syslogPort
@@ -188,7 +192,6 @@ function Write-Log {
         $params.logDate = $logDate
         $params.logFileNamePrefix = $logFileNamePrefix
         $params.logDir = $logDir
-
         Send-Syslog @params
     }
 }
@@ -465,7 +468,8 @@ function Get-VMStateBasedOnTag {
         [ValidateNotNullOrEmpty()]
         [String]$stateTagsCatName
     )
-    
+
+    $vm = get-vm $vm -Server $viConn
     $tagAssignment = Get-TagAssignment -Entity $vm -Category $stateTagsCatName -Server $viConn
     if (!$tagAssignment) {
         Write-Log -severityLevel Warn -logMessage "No state tag applied to VM $($vm.name)."
@@ -510,8 +514,16 @@ function Set-VMStateTag {
         $logParameters.logFileNamePrefix = $envLogPrefix
     }
     try {
+        Write-Log @logParameters -severityLevel Info -logMessage "Refreshing VM '$($vm.Name)' object"
+        $vm = get-vm $vm -Server $viConn
+        #Update viConn incase more than 1 was passed.
+        $viConn = $viConn | ?{$_.Id -eq ($vm.Uid -Split 'VirtualMachine' | Select -First 1)}
+
         Write-Log @logParameters -severityLevel Info -logMessage "Preparing to set '$stateTagsCatName : $tagName' tag on '$($vm.Name)'"
-        Get-TagAssignment -Entity $vm -Category $stateTagsCatName -Server $viConn | Remove-TagAssignment -Confirm:$false -WhatIf:(!!$WhatIf)
+        $currentTagAssignment = Get-TagAssignment -Entity $vm -Category $stateTagsCatName -Server $viConn
+        if (!!$currentTagAssignment) {
+            Remove-TagAssignment -TagAssignment $currentTagAssignment -Confirm:$false -WhatIf:(!!$WhatIf)
+        }
         $tag = Get-Tag -Name $tagName -Category $stateTagsCatName -Server $viConn 
         $null = New-TagAssignment -Entity $vm -Tag $tag -Server $viConn -WhatIf:(!!$WhatIf)
         Write-Log @logParameters -severityLevel Info -logMessage "Successfully to set '$stateTagsCatName : $tagName' tag on '$($vm.Name)'"
@@ -740,6 +752,13 @@ function Confirm-MigrationTargets {
         [Switch]$ignoreVmTools
     )
     #Check that all VMs and target locations listed in input file are valid
+    $missingvCenters = $inputs."$($inputHeaders.vcenter)".ToLower() | select -Unique | ?{$_ -notin $viConnections.Name.ToLower()}
+    if ($missingvCenters.Length -gt 0) {
+        $missingMessage = "The following vCenters specified in the input CSV are missing from the 'vCenters' input:$($missingvCenters -join ', ')"
+        Write-Log -severityLevel Error -logMessage $missingMessage
+        throw $missingMessage
+    }
+
     $vmValidationResult = Confirm-VMs -vmNames $inputs."$($inputHeaders.name)" -viConnection $viConnections
     $missingVMs = $vmValidationResult.missingVMs
     $vms = $vmValidationResult.vms
@@ -758,16 +777,18 @@ function Confirm-MigrationTargets {
     #Additionaly, we will validate the network & storage selections with the context of the selected compute for each row.
     $missingPortGroups = @()
     $missingStorage = @()
-    $dscViews = Get-View -ViewType StoragePod -Server $viConnections
+    #$dscViews = Get-View -ViewType StoragePod -Server $viConnections
     $migrationTargets = $inputs | %{
-        $vmName = $_."$($inputHeaders.name)" 
+        $vmName = $_."$($inputHeaders.name)"
+        $vCenterName = $_."$($inputHeaders.vcenter)"
         $computeName = $_."$($inputHeaders.compute)"
         $networkName = $_."$($inputHeaders.network)"
         $storageName = $_."$($inputHeaders.storage)"
 
         $vmObj = $vms | ?{$_.Name -eq $vmName}
-        $viConn = $viConnections | ?{$_.Id -eq ($vmObj.Uid -Split 'VirtualMachine' | Select -First 1)}
-        $computeObj = $computes | ?{$_.Name -eq $computeName} 
+        $srcViConn = $viConnections | ?{$_.Id -eq ($vmObj.Uid -Split 'VirtualMachine' | Select -First 1)}
+        $tgtViConn = $viConnections | ?{$_.Name -eq $vCenterName}
+        $computeObj = $computes | ?{$_.Name -eq $computeName -and $_.Uid -like "*$($tgtViConn.Id)*"} 
         $computeView = $computeObj | Get-View
         if ($computeView.GetType().Name -eq 'ResourcePool') {
             $computeView.updateviewdata('Owner.*')
@@ -810,7 +831,7 @@ function Confirm-MigrationTargets {
         }
 
         $validationErrors = @()
-        $vmState = Get-VMStateBasedOnTag -vm $vmObj -viConn $viConn -stateTagsCatName $tagDetails.tagCatName
+        $vmState = Get-VMStateBasedOnTag -vm $vmObj -viConn $srcViConn -stateTagsCatName $tagDetails.tagCatName
         $jobState = $vmState
         $job = $null
         $eligibleToRun = $false
@@ -852,10 +873,12 @@ function Confirm-MigrationTargets {
         }
 
         [PSCustomObject]@{
+            src_vcenter = $srcViConn
             tgt_vm = $vmObj
             tgt_compute = $computeObj
             tgt_network = $networkObj
             tgt_storage = $storageObj
+            tgt_vcenter = $tgtViConn
             tag_state = $vmState
             job_state = $jobState
             job = $job
@@ -906,6 +929,8 @@ function Confirm-RollbackTargets {
         [Switch]$ignoreVmTools
     )
     #Check that all VMs listed in input file are valid
+
+
     $vmValidationResult = Confirm-VMs -vmNames $inputs."$($inputHeaders.name)" -viConnection $viConnections
     $missingVMs = $vmValidationResult.missingVMs
     $vms = $vmValidationResult.vms
@@ -961,12 +986,13 @@ function Confirm-RollbackTargets {
     $missingFolders = @()
     $missingSnapshots = @()
     $rollbackTargets = $rollbackTargets | %{
-        $vm = $_.tgt_vm
-        $tgtVc = $_.tgt_vc
-        $viConn = $viConnections | ?{$_.Name -eq $tgtVc}
+        $target = $_
+        $vm = $target.tgt_vm
+        $srcViConn = $viConnections | ?{$_.Id -eq ($vm.Uid -Split 'VirtualMachine' | Select -First 1)}
+        $tgtViConn = $viConnections | ?{$_.Name -eq $target.tgt_vc}
 
         $validationErrors = @()
-        $vmState = Get-VMStateBasedOnTag -vm $vm -viConn $viConn -stateTagsCatName $tagDetails.tagCatName
+        $vmState = Get-VMStateBasedOnTag -vm $vm -viConn $srcViConn -stateTagsCatName $tagDetails.tagCatName
         $jobState = $vmState
         $job = $null
         $eligibleToRun = $false
@@ -993,16 +1019,16 @@ function Confirm-RollbackTargets {
             $eligibleToRun = $true
         }
 
-        if (!$viConn) {
+        if (!$tgtViConn) {
             Write-Log -severityLevel Error -logMessage "No current connection for rollback vCenter '$($_.tgt_vc)' was found (vCenter for VM: '$($vm.Name)'). You must specify all required vCenters when executing the script."
             $missingvCenters += $_.tgt_vc
             continue
         }
 
-        $notFoundError = "No object found matching MoRef or Name '{0}' in vCenter '$($viConn.Name)'"
+        $notFoundError = "No object found matching MoRef or Name '{0}' in vCenter '$($tgtViConn.Name)'"
         try {
             $rollbackHostId = $_.tgt_host
-            $hostObj = Get-VIObjectByVIView -MORef $rollbackHostId -Server $viConn -ErrorAction Stop
+            $hostObj = Get-VIObjectByVIView -MORef $rollbackHostId -Server $tgtViConn -ErrorAction Stop
         } catch {
             if ($eligibleToRun) {
                 Write-Log -severityLevel Error -logMessage ($notFoundError -f $rollbackHostId)
@@ -1011,7 +1037,7 @@ function Confirm-RollbackTargets {
         }
         try {
             $rollbackResPoolId = $_.tgt_respool
-            $rpObj = Get-VIObjectByVIView -MORef $rollbackResPoolId -Server $viConn -ErrorAction Stop
+            $rpObj = Get-VIObjectByVIView -MORef $rollbackResPoolId -Server $tgtViConn -ErrorAction Stop
         } catch {
             if ($eligibleToRun) {
                 Write-Log -severityLevel Error -logMessage ($notFoundError -f $rollbackResPoolId)
@@ -1020,7 +1046,7 @@ function Confirm-RollbackTargets {
         }
         try {
             $rollbackVmFolderId = $_.tgt_folder
-            $folderObj = Get-VIObjectByVIView -MORef $rollbackVmFolderId -Server $viConn -ErrorAction Stop
+            $folderObj = Get-VIObjectByVIView -MORef $rollbackVmFolderId -Server $tgtViConn -ErrorAction Stop
         } catch {
             if ($eligibleToRun) {
                 Write-Log -severityLevel Error -logMessage ($notFoundError -f $rollbackVmFolderId)
@@ -1029,7 +1055,7 @@ function Confirm-RollbackTargets {
         }
         try {
             $rollbackPortGroupId = $_.tgt_network
-            $pgObj = Get-VIObjectByVIView -MORef $rollbackPortGroupId -Server $viConn -ErrorAction Stop
+            $pgObj = Get-VIObjectByVIView -MORef $rollbackPortGroupId -Server $tgtViConn -ErrorAction Stop
         } catch {
             if ($eligibleToRun) {
                 Write-Log -severityLevel Error -logMessage ($notFoundError -f $rollbackPortGroupId)
@@ -1038,7 +1064,7 @@ function Confirm-RollbackTargets {
         }
         try {
             $rollbackDatastoreId = $_.tgt_datastore
-            $dsObj = Get-VIObjectByVIView -MORef $rollbackDatastoreId -Server $viConn -ErrorAction Stop
+            $dsObj = Get-VIObjectByVIView -MORef $rollbackDatastoreId -Server $tgtViConn -ErrorAction Stop
         } catch {
             if ($eligibleToRun) {
                 Write-Log -severityLevel Error -logMessage ($notFoundError -f $rollbackDatastoreId)
@@ -1047,7 +1073,7 @@ function Confirm-RollbackTargets {
         }
         try {
             $rollbackSnapshotName = $_.tgt_snapshot
-            $snapObj = Get-Snapshot -VM $vm -Name $rollbackSnapshotName -Server $viConn -ErrorAction Stop
+            $snapObj = Get-Snapshot -VM $vm -Name $rollbackSnapshotName -Server $srcViConn -ErrorAction Stop
         } catch {
             if ($eligibleToRun) {
                 Write-Log -severityLevel Error -logMessage ($notFoundError -f $rollbackSnapshotName)
@@ -1069,8 +1095,9 @@ function Confirm-RollbackTargets {
         }
 
         [PSCustomObject]@{
+            src_vcenter = $srcViConn
             tgt_vm = $vm
-            tgt_vc = $viConn
+            tgt_vcenter = $tgtViConn
             tgt_host = $hostObj
             tgt_respool = $rpObj
             tgt_folder = $folderObj
@@ -1201,7 +1228,11 @@ function Start-MigrateVMJob {
     param (
         [Parameter(Mandatory)]
         [ValidateNotNullOrEmpty()]
-        $viConn,
+        $srcViConn,
+
+        [Parameter(Mandatory)]
+        [ValidateNotNullOrEmpty()]
+        $tgtViConn,
 
         [Parameter(Mandatory)]
         [ValidateNotNullOrEmpty()]
@@ -1221,7 +1252,11 @@ function Start-MigrateVMJob {
 
         [Parameter(Mandatory)]
         [ValidateNotNullOrEmpty()]
-        [PSCredential]$cred,
+        [PSCredential]$srcCred,
+
+        [Parameter(Mandatory)]
+        [ValidateNotNullOrEmpty()]
+        [PSCredential]$tgtCred,
 
         [Parameter(Mandatory)]
         [ValidateNotNullOrEmpty()]
@@ -1249,11 +1284,12 @@ function Start-MigrateVMJob {
             $using:scriptVars | %{ New-Variable -Name $_.Name -Value $_.Value}
             #Had to move awawy from using the session secret due to PowerCLI/vC Lookup Service issue when running inside of a PS Job
             #$viConn = Connect-ViServer -Server $using:viConn -Session $using:viConn.SessionSecret
-            $viConn = Connect-ViServer -Server $using:viConn.Name -Credential $using:cred
-            $vm = Get-VIObjectByVIView -MORef $using:vm.Id -Server $viConn
-            $compute = Get-VIObjectByVIView -MORef $using:compute.Id -Server $viConn        
-            $network = Get-VIObjectByVIView -MORef $using:network.Id -Server $viConn
-            $storage = Get-VIObjectByVIView -MORef $using:storage.Id -Server $viConn
+            $srcViConn = Connect-ViServer -Server $using:srcViConn.Name -Credential $using:srcCred
+            $tgtViConn = Connect-ViServer -Server $using:tgtViConn.Name -Credential $using:tgtCred
+            $vm = Get-VIObjectByVIView -MORef $using:vm.Id -Server $srcViConn
+            $compute = Get-VIObjectByVIView -MORef $using:compute.Id -Server $tgtViConn
+            $network = Get-VIObjectByVIView -MORef $using:network.Id -Server $tgtViConn
+            $storage = Get-VIObjectByVIView -MORef $using:storage.Id -Server $tgtViConn
             $WhatIf = $using:test
             $isRetry = $using:retry
             $vmName = $vm.Name
@@ -1275,22 +1311,22 @@ function Start-MigrateVMJob {
             Write-Log -severityLevel Info -logMessage ("Starting {0}migration process on '$($vm.Name)'." -f $retryMessage)
             
             #validate no-one is stepping on our job
-            $currentState = Get-VMStateBasedOnTag -vm $vm -viConn $viConn -stateTagsCatName $vamtTagDetails.tagCatName
+            $currentState = Get-VMStateBasedOnTag -vm $vm -viConn $srcViConn -stateTagsCatName $vamtTagDetails.tagCatName
             $allowedStates = @($vamtTagDetails.readyTagName)
             if ($isRetry) {
                 $allowedStates += $vamtTagDetails.inProgressTagName
             }
             if ($currentState -in $allowedStates) {
                 #change tag to in progress
-                $null = Confirm-ActiveTasks -vm $vm -viConnection $viConn -waitTasks -WhatIf:$WhatIf
-                $null = Set-VMStateTag -vm $vm -tagName $vamtTagDetails.inProgressTagName -stateTagsCatName $vamtTagDetails.tagCatName -WhatIf:$WhatIf -viConn $viConn
+                $null = Confirm-ActiveTasks -vm $vm -viConnection $srcViConn -waitTasks -WhatIf:$WhatIf
+                $null = Set-VMStateTag -vm $vm -tagName $vamtTagDetails.inProgressTagName -stateTagsCatName $vamtTagDetails.tagCatName -WhatIf:$WhatIf -viConn $srcViConn
             } else {
                 throw "Detected invalid tag state '$currentState' on '$vmName'. This is likely the result of a concurent job running on the VM elsewhere."
             }
             
             #get current compute, network, storage
             Write-Log -severityLevel Info -logMessage "Gathering current compute, network, storage, folder details for '$($vm.Name)'."
-            $currentVC = $viConn.Name
+            $currentVC = $srcViConn.Name
             $currentHostId = $vm.VMHostId
             $currentRpId = $vm.ResourcePoolId
             $currentFolderId = $vm.FolderId
@@ -1303,27 +1339,27 @@ function Start-MigrateVMJob {
             $moveParameters = @{
                 VM = $vm
                 Confirm = $false
-                Server = $viConn
+                Server = $tgtViConn
                 WhatIf = !!$WhatIf
                 ErrorAction = "Stop"
             }
-            $currentStorage = Get-View -id $currentDsId -Server $viConn
+            $currentStorage = Get-View -id $currentDsId -Server $srcViConn
             if ($storage.Id -notin @($currentDsId, $currentStorage.Parent.ToString())) {
                 $moveParameters.Datastore = $storage
             }
             if ($currentPgId -ne $network.Id) {
-                if ($network.NetworkType -eq "Opaque") {
+                if ($null -ne $network.NetworkType) {
                     $moveParameters.Network = $network
                 } else {
                     $moveParameters.PortGroup = $network
                 }
             }
-            $currentResPool = Get-VIObjectByVIView -MORef $currentRpId
+            $currentResPool = Get-VIObjectByVIView -MORef $currentRpId -Server $srcViConn
             if ($compute.Id -notin @($currentHostId, $currentRpId, $currentResPool.ExtensionData.Owner.ToString())) {
                 if ($compute.ExtensionData.MoRef.Type -eq "ClusterComputeResource") {
                     $tgtCompute = Get-VMHost -Location $compute | ?{$_.ConnectionState -eq "Connected"} | Get-Random
                 } elseif ($compute.ExtensionData.MoRef.Type -eq "ResourcePool") {
-                    $tgtCluster = Get-Cluster -Id $compute.ExtensionData.Owner.ToString() -Server $viConn
+                    $tgtCluster = Get-Cluster -Id $compute.ExtensionData.Owner.ToString() -Server $tgtViConn
                     $tgtCompute = Get-VMHost -Location $tgtCluster | ?{$_.ConnectionState -eq "Connected"} | Get-Random
                 } else {
                     $tgtCompute = $compute
@@ -1341,18 +1377,18 @@ function Start-MigrateVMJob {
             }
 
             #write attributes for current compute, network, storage, snapshot name
-            $sourceVcAttribute = Get-CustomAttribute -Server $viConn -Name $vamtVcAttrDetails.sourceVcAttribute
-            $sourceHostAttribute = Get-CustomAttribute -Server $viConn -Name $vamtVcAttrDetails.sourceHostAttribute
-            $sourceRpAttribute = Get-CustomAttribute -Server $viConn -Name $vamtVcAttrDetails.sourceRpAttribute
-            $sourceFolderAttribute = Get-CustomAttribute -Server $viConn -Name $vamtVcAttrDetails.sourceFolderAttribute
-            $sourceDsAttribute = Get-CustomAttribute -Server $viConn -Name $vamtVcAttrDetails.sourceDsAttribute
-            $sourcePgAttribute = Get-CustomAttribute -Server $viConn -Name $vamtVcAttrDetails.sourcePgAttribute
-            $timestampAttribute = Get-CustomAttribute -Server $viConn -Name $vamtVcAttrDetails.migrationTsAttribute
-            $snapshotNameAttribute = Get-CustomAttribute -Server $viConn -Name $vamtVcAttrDetails.snapshotNameAttribute
+            $sourceVcAttribute = Get-CustomAttribute -Server $srcViConn -Name $vamtVcAttrDetails.sourceVcAttribute
+            $sourceHostAttribute = Get-CustomAttribute -Server $srcViConn -Name $vamtVcAttrDetails.sourceHostAttribute
+            $sourceRpAttribute = Get-CustomAttribute -Server $srcViConn -Name $vamtVcAttrDetails.sourceRpAttribute
+            $sourceFolderAttribute = Get-CustomAttribute -Server $srcViConn -Name $vamtVcAttrDetails.sourceFolderAttribute
+            $sourceDsAttribute = Get-CustomAttribute -Server $srcViConn -Name $vamtVcAttrDetails.sourceDsAttribute
+            $sourcePgAttribute = Get-CustomAttribute -Server $srcViConn -Name $vamtVcAttrDetails.sourcePgAttribute
+            $timestampAttribute = Get-CustomAttribute -Server $srcViConn -Name $vamtVcAttrDetails.migrationTsAttribute
+            $snapshotNameAttribute = Get-CustomAttribute -Server $srcViConn -Name $vamtVcAttrDetails.snapshotNameAttribute
 
             Write-Log -severityLevel Info -logMessage "Writing current compute, network, storage, folder details to '$($vm.Name)' custom attributes."
             if (!$WhatIf) {
-                $null = Confirm-ActiveTasks -vm $vm -viConnection $viConn -waitTasks
+                $null = Confirm-ActiveTasks -vm $vm -viConnection $srcViConn -waitTasks
                 $null = $vm | Set-Annotation -CustomAttribute $sourceVcAttribute -Value $currentVC
                 $null = $vm | Set-Annotation -CustomAttribute $sourceHostAttribute -Value $currentHostId
                 $null = $vm | Set-Annotation -CustomAttribute $sourceRpAttribute -Value $currentRpId
@@ -1364,16 +1400,16 @@ function Start-MigrateVMJob {
 
             #preMigration extensibility stub
             Write-Log -severityLevel Info -logMessage "Starting Pre Migration Extensibility actions."
-            $extResult = Start-PreMigrationExtensibility -viConnection $viConn -vm $vm -WhatIf:$WhatIf
+            $extResult = Start-PreMigrationExtensibility -viConnection $srcViConn -vm $vm -WhatIf:$WhatIf
             if (!$extResult) {
                 throw "Pre Migration Extensibility actions failed."
             }
 
             #shutdown VM
-            $vm = Get-VM -Id $vm.Id -Server $viConn #refresh VM object
+            $vm = Get-VM -Id $vm.Id -Server $srcViConn #refresh VM object
             if (!$WhatIf) {
                 if ($vm.PowerState -eq "PoweredOn") {
-                    $null = Confirm-ActiveTasks -vm $vm -viConnection $viConn -waitTasks
+                    $null = Confirm-ActiveTasks -vm $vm -viConnection $srcViConn -waitTasks
                     Write-Log -severityLevel Info -logMessage "Beginning GuestOS Shutdown on '$($vm.Name)'"
                     $null = Stop-VMGuest -VM $vm -Confirm:$false
                     $sleepTimer = 5 #seconds
@@ -1387,7 +1423,7 @@ function Start-MigrateVMJob {
                             Write-Log -severityLevel Warn -logMessage "Shutdown of VM '$($vm.Name)' has timed out. Forcing poweroff now."
                             $vm = Stop-VM -VM $vm -Server $viConn -Confirm:$false
                         }
-                        $vm = Get-VM -Id $vm.Id -Server $viConn #refresh VM object
+                        $vm = Get-VM -Id $vm.Id -Server $srcViConn #refresh VM object
                     }
                 } else {
                     Write-Log -severityLevel Info -logMessage "'$($vm.Name)' is already PoweredOff. Continuing."
@@ -1400,10 +1436,10 @@ function Start-MigrateVMJob {
             Write-Log -severityLevel Info -logMessage "Creating/Retrieving pre-migration snapshot on '$($vm.Name)'."
             $snapshotName = "VAMT_Migration_$($vamtScriptLaunchTime.ToShortDateString() -replace '/','_')_$($vamtScriptLaunchTime.ToLongTimeString() -replace ' ','_')"
             $snapshotDescription = "Snapshot taken by VAMT migration script.`nRun by: $($env:USERNAME)"
-            $snapshot = Get-Snapshot -VM $vm -Name $snapshotName -Server $viConn -ErrorAction SilentlyContinue
+            $snapshot = Get-Snapshot -VM $vm -Name $snapshotName -Server $srcViConn -ErrorAction SilentlyContinue
             if (!$snapshot) {
-                $null = Confirm-ActiveTasks -vm $vm -viConnection $viConn -waitTasks -WhatIf:$WhatIf
-                $snapshot = New-Snapshot -VM $vm -Name $snapshotName -Description $snapshotDescription -Server $viConn -Confirm:$false -WhatIf:$WhatIf -ErrorAction Stop
+                $null = Confirm-ActiveTasks -vm $vm -viConnection $srcViConn -waitTasks -WhatIf:$WhatIf
+                $snapshot = New-Snapshot -VM $vm -Name $snapshotName -Description $snapshotDescription -Server $srcViConn -Confirm:$false -WhatIf:$WhatIf -ErrorAction Stop
             }
             $null = $vm | Set-Annotation -CustomAttribute $snapshotNameAttribute -Value $snapshot.Name -WhatIf:$WhatIf
             Write-Log -severityLevel Info -logMessage "Successfully created/retrieved pre-migration snapshot on '$($vm.Name)' with name: $snapshotName"
@@ -1411,27 +1447,27 @@ function Start-MigrateVMJob {
             #Move VM
             Write-Log -severityLevel Info -logMessage "Starting VM Migration for '$($vm.Name)'."
             Write-Log -severityLevel Debug -logMessage "VM migration spec:`n$($moveParameters | Out-String)"
-            $null = Confirm-ActiveTasks -vm $vm -viConnection $viConn -waitTasks -WhatIf:$WhatIf
+            $null = Confirm-ActiveTasks -vm $vm -viConnection $srcViConn -waitTasks -WhatIf:$WhatIf
             $vm = Move-VM @moveParameters
             if ($compute.ExtensionData.MoRef.Type -eq "ResourcePool" -and $vm.ResourcePoolId -ne $compute.Id) {
                 $moveParameters = @{
                     VM = $vm
                     Destination = $compute
                     Confirm = $false
-                    Server = $viConn
+                    Server = $tgtViConn
                     WhatIf = !!$WhatIf
                     ErrorAction = "Stop"
                 }
                 Write-Log -severityLevel Info -logMessage "Moving VM '$($vm.Name)' into resource pool '$($compute.Name)'."
-                $null = Confirm-ActiveTasks -vm $vm -viConnection $viConn -waitTasks -WhatIf:$WhatIf
+                $null = Confirm-ActiveTasks -vm $vm -viConnection $tgtViConn -waitTasks -WhatIf:$WhatIf
                 $vm = Move-VM @moveParameters
             }
 
 
             #start the VM and wait for VM tools
             Write-Log -severityLevel Info -logMessage "Migration completed successfully. Powering on '$($vm.Name)'."
-            $null = Confirm-ActiveTasks -vm $vm -viConnection $viConn -waitTasks -WhatIf:$WhatIf
-            $vm = Start-VM -VM $vm -Server $viConn -Confirm:$false -WhatIf:$WhatIf
+            $null = Confirm-ActiveTasks -vm $vm -viConnection $tgtViConn -waitTasks -WhatIf:$WhatIf
+            $vm = Start-VM -VM $vm -Server $tgtViConn -Confirm:$false -WhatIf:$WhatIf
             if (!$WhatIf -and !$vamtIgnoreVmTools) {
                 Write-Log -severityLevel Info -logMessage "Waiting for VMware Tools...(Timeout: $vamtOsPowerOnTimeout seconds)"
                 #Adding sleep to avoid VMtools not installed issue
@@ -1439,19 +1475,43 @@ function Start-MigrateVMJob {
                 $vm = Wait-Tools -VM $vm -TimeoutSeconds $vamtOsPowerOnTimeout -ErrorAction Stop
             }
 
+            #write attributes to migrated machine if it's in a new vCenter as attributes are not moved
+            if ($srcViConn.Name -notcontains $tgtViConn.Name) {
+                Write-Log -severityLevel Info -logMessage "Writing past compute, network, storage, folder details to '$($vm.Name)' custom attributes."
+                if (!$WhatIf) {
+                    $sourceVcAttribute = Get-CustomAttribute -Server $tgtViConn -Name $vamtVcAttrDetails.sourceVcAttribute
+                    $sourceHostAttribute = Get-CustomAttribute -Server $tgtViConn -Name $vamtVcAttrDetails.sourceHostAttribute
+                    $sourceRpAttribute = Get-CustomAttribute -Server $tgtViConn -Name $vamtVcAttrDetails.sourceRpAttribute
+                    $sourceFolderAttribute = Get-CustomAttribute -Server $tgtViConn -Name $vamtVcAttrDetails.sourceFolderAttribute
+                    $sourceDsAttribute = Get-CustomAttribute -Server $tgtViConn -Name $vamtVcAttrDetails.sourceDsAttribute
+                    $sourcePgAttribute = Get-CustomAttribute -Server $tgtViConn -Name $vamtVcAttrDetails.sourcePgAttribute
+                    $timestampAttribute = Get-CustomAttribute -Server $tgtViConn -Name $vamtVcAttrDetails.migrationTsAttribute
+                    $snapshotNameAttribute = Get-CustomAttribute -Server $tgtViConn -Name $vamtVcAttrDetails.snapshotNameAttribute
+                    $null = Confirm-ActiveTasks -vm $vm -viConnection $tgtViConn -waitTasks
+                    $null = $vm | Set-Annotation -CustomAttribute $sourceVcAttribute -Value $currentVC
+                    $null = $vm | Set-Annotation -CustomAttribute $sourceHostAttribute -Value $currentHostId
+                    $null = $vm | Set-Annotation -CustomAttribute $sourceRpAttribute -Value $currentRpId
+                    $null = $vm | Set-Annotation -CustomAttribute $sourceFolderAttribute -Value $currentFolderId
+                    $null = $vm | Set-Annotation -CustomAttribute $sourceDsAttribute -Value $currentDsId
+                    $null = $vm | Set-Annotation -CustomAttribute $sourcePgAttribute -Value $currentPgId
+                    $null = $vm | Set-Annotation -CustomAttribute $timestampAttribute -Value $vamtScriptLaunchTime.ToString()
+                    $null = $vm | Set-Annotation -CustomAttribute $snapshotNameAttribute -Value $snapshot.Name
+                }
+            }
+
             #post migraion extensibility stub
             Write-Log -severityLevel Info -logMessage "Starting Post Migration Extensibility actions."
-            $extResult = Start-PostMigrationExtensibility -viConnection $viConn -vm $vm -WhatIf:$WhatIf
+            $extResult = Start-PostMigrationExtensibility -viConnection $tgtViConn -vm $vm -WhatIf:$WhatIf
             if (!$extResult) {
                 throw "Post Migration Extensibility actions failed."
             }
 
             #change tag to complete
-            $null = Confirm-ActiveTasks -vm $vm -viConnection $viConn -waitTasks -WhatIf:$WhatIf
-            $null = Set-VMStateTag -vm $vm -tagName $vamtTagDetails.completeTagName -stateTagsCatName $vamtTagDetails.tagCatName -WhatIf:$WhatIf -viConn $viConn
+            $null = Confirm-ActiveTasks -vm $vm -viConnection $tgtViConn -waitTasks -WhatIf:$WhatIf
+            $null = Set-VMStateTag -vm $vm -tagName $vamtTagDetails.completeTagName -stateTagsCatName $vamtTagDetails.tagCatName -WhatIf:$WhatIf -viConn $tgtViConn
 
             Write-Log -severityLevel Info -logMessage "Migration of '$($vm.Name)' completed successfully."
-            try { Disconnect-VIServer $viConn -Confirm:$false } catch {}
+            try { Disconnect-VIServer * -Confirm:$false } catch {}
 
             return [PSCustomObject]@{
                 result = "Successfully moved VM '$($vm.Name)'."
@@ -1463,7 +1523,7 @@ function Start-MigrateVMJob {
             try { Disconnect-VIServer * -Confirm:$false } catch {}
             throw $_
         }
-    } -InitializationScript ([scriptblock]::Create($jobFunctions)) -ArgumentList($viConn,$vm,$compute,$network,$storage,$cred,$retry,$test,$scriptVars)
+    } -InitializationScript ([scriptblock]::Create($jobFunctions)) -ArgumentList($srcViConn,$tgtViConn,$vm,$compute,$network,$storage,$cred,$retry,$test,$scriptVars)
 
     return $migrationJob 
 }
@@ -1472,7 +1532,11 @@ function Start-RollbackVMJob {
     param (
         [Parameter(Mandatory)]
         [ValidateNotNullOrEmpty()]
-        $viConn,
+        $srcViConn,
+
+        [Parameter(Mandatory)]
+        [ValidateNotNullOrEmpty()]
+        $tgtViConn,
 
         [Parameter(Mandatory)]
         [ValidateNotNullOrEmpty()]
@@ -1488,7 +1552,7 @@ function Start-RollbackVMJob {
 
         [Parameter(Mandatory)]
         [ValidateNotNullOrEmpty()]
-        $portgroup,
+        $network,
 
         [Parameter(Mandatory)]
         [ValidateNotNullOrEmpty()]
@@ -1504,7 +1568,11 @@ function Start-RollbackVMJob {
 
         [Parameter(Mandatory)]
         [ValidateNotNullOrEmpty()]
-        [PSCredential]$cred,
+        [PSCredential]$srcCred,
+
+        [Parameter(Mandatory)]
+        [ValidateNotNullOrEmpty()]
+        [PSCredential]$tgtCred,
 
         [Parameter(Mandatory)]
         [ValidateNotNullOrEmpty()]
@@ -1531,15 +1599,16 @@ function Start-RollbackVMJob {
             $using:scriptVars | %{ New-Variable -Name $_.Name -Value $_.Value}
             #Had to move awawy from using the session secret due to PowerCLI/vC Lookup Service issue when running inside of a PS Job
             #$viConn = Connect-ViServer -Server $using:viConn -Session $using:viConn.SessionSecret
-            $viConn = Connect-ViServer -Server $using:viConn.Name -Credential $using:cred
-            $vm = Get-VIObjectByVIView -MORef $using:vm.Id -Server $viConn
+            $srcViConn = Connect-ViServer -Server $using:srcViConn.Name -Credential $using:srcCred
+            $tgtViConn = Connect-ViServer -Server $using:tgtViConn.Name -Credential $using:tgtCred
+            $vm = Get-VIObjectByVIView -MORef $using:vm.Id -Server $srcViConn
             $vmName = $vm.Name
-            $vmhost = Get-VIObjectByVIView -MORef $using:vmhost.Id -Server $viConn
-            $respool = Get-VIObjectByVIView -MORef $using:respool.Id -Server $viConn
-            $portgroup = Get-VIObjectByVIView -MORef $using:portgroup.Id -Server $viConn
-            $vmfolder = Get-VIObjectByVIView -MORef $using:vmfolder.Id -Server $viConn
-            $datastore = Get-VIObjectByVIView -MORef $using:datastore.Id -Server $viConn
-            $snapshot = Get-VIObjectByVIView -MORef $using:snapshot.Id -Server $viConn
+            $vmhost = Get-VIObjectByVIView -MORef $using:vmhost.Id -Server $tgtViConn
+            $respool = Get-VIObjectByVIView -MORef $using:respool.Id -Server $tgtViConn
+            $network = Get-VIObjectByVIView -MORef $using:network.Id -Server $tgtViConn
+            $vmfolder = Get-VIObjectByVIView -MORef $using:vmfolder.Id -Server $tgtViConn
+            $datastore = Get-VIObjectByVIView -MORef $using:datastore.Id -Server $tgtViConn
+            $snapshotName = $using:snapshot.Name
             $WhatIf = $using:test
             $isRetry = $using:retry
             $Script:envLogPrefix = $vmName
@@ -1560,22 +1629,22 @@ function Start-RollbackVMJob {
             Write-Log -severityLevel Info -logMessage ("Starting {0}rollback process on '$vmName'." -f $retryMessage)
 
             #validate no-one is stepping on our job
-            $currentState = Get-VMStateBasedOnTag -vm $vm -viConn $viConn -stateTagsCatName $vamtTagDetails.tagCatName
+            $currentState = Get-VMStateBasedOnTag -vm $vm -viConn $srcViConn -stateTagsCatName $vamtTagDetails.tagCatName
             $allowedStates = @($vamtTagDetails.readyToRollbackTagName)
             if ($isRetry) {
                 $allowedStates += $vamtTagDetails.inProgressTagName
             }
             if ($currentState -in $allowedStates) {
                 #change tag to in progress
-                $null = Confirm-ActiveTasks -vm $vm -viConnection $viConn -waitTasks -WhatIf:$WhatIf
-                $null = Set-VMStateTag -vm $vm -tagName $vamtTagDetails.inProgressTagName -stateTagsCatName $vamtTagDetails.tagCatName -WhatIf:$WhatIf -viConn $viConn
+                $null = Confirm-ActiveTasks -vm $vm -viConnection $srcViConn -waitTasks -WhatIf:$WhatIf
+                $null = Set-VMStateTag -vm $vm -tagName $vamtTagDetails.inProgressTagName -stateTagsCatName $vamtTagDetails.tagCatName -WhatIf:$WhatIf -viConn $srcViConn
             } else {
                 throw "Detected invalid tag state '$currentState' on '$vmName'. This is likely the result of a concurent job running on the VM elsewhere."
             }
 
             #get current compute, network, storage
             Write-Log -severityLevel Info -logMessage "Gathering current compute, network, storage, folder details for '$vmName'."
-            $currentVC = $viConn.Name
+            $currentVC = $srcViConn.Name
             $currentHostId = $vm.VMHostId
             $currentRpId = $vm.ResourcePoolId
             $currentFolderId = $vm.FolderId
@@ -1588,26 +1657,26 @@ function Start-RollbackVMJob {
             $moveParameters = @{
                 VM = $vm
                 Confirm = $false
-                Server = $viConn
+                Server = $tgtViConn
                 WhatIf = $WhatIf
                 ErrorAction = "Stop"
             }
-            if ($currentDsId -ne $datastore.Id) {
+            if ($currentDsId -ne $datastore.Id -or $srcViConn.Name -notcontains $tgtViConn.Name) {
                 $moveParameters.Datastore = $datastore
             }
-            if ($currentPgId -ne $portgroup.Id) {
+            if ($currentPgId -ne $network.Id -or $srcViConn.Name -notcontains $tgtViConn.Name) {
                 #Move-VM uses different network parameters for NSX-T networks vs std & vds PortGroups
-                if ($network.NetworkType -eq "Opaque") {
-                    $moveParameters.Network = $portgroup
+                if ($null -ne $network.NetworkType) {
+                    $moveParameters.Network = $network
                 } else {
-                    $moveParameters.PortGroup = $portgroup
+                    $moveParameters.PortGroup = $network
                 }
             }
-            if ($currentFolderId -ne $vmfolder.Id) {
+            if ($currentFolderId -ne $vmfolder.Id -or $srcViConn.Name -notcontains $tgtViConn.Name) {
                 $moveParameters.InventoryLocation = $vmfolder
             }
-            $currentHost = Get-VIObjectByVIView -MORef $currentHostId -Server $viConn
-            if ($currentHostId -ne $vmhost.Id -and $currentHost.Parent.Id -ne $vmhost.Parent.Id) {
+            $currentHost = Get-VIObjectByVIView -MORef $currentHostId -Server $srcViConn
+            if (($currentHostId -ne $vmhost.Id -and $currentHost.Parent.Id -ne $vmhost.Parent.Id) -or $srcViConn.Name -notcontains $tgtViConn.Name) {
                 $moveParameters.Destination = $vmhost
             }
             #catch incase nothing is apparently moving, just add the compute and vCenter will handle it gracefully.
@@ -1626,12 +1695,12 @@ function Start-RollbackVMJob {
             }
 
             #PowerOff VM
-            $vm = Get-VM -Id $vm.Id -Server $viConn #refresh VM object
+            $vm = Get-VM -Id $vm.Id -Server $srcViConn #refresh VM object
             if (!$WhatIf) {
                 if ($vm.PowerState -eq "PoweredOn") {
-                    $null = Confirm-ActiveTasks -vm $vm -viConnection $viConn -waitTasks
+                    $null = Confirm-ActiveTasks -vm $vm -viConnection $srcViConn -waitTasks
                     Write-Log -severityLevel Info -logMessage "Beginning PowerOff on '$($vm.Name)'"
-                    $vm = Stop-VM -VM $vm -Server $viConn -Confirm:$false
+                    $vm = Stop-VM -VM $vm -Server $srcViConn -Confirm:$false
                 } else {
                     Write-Log -severityLevel Info -logMessage "'$($vm.Name)' is already PoweredOff. Continuing."
                 } 
@@ -1643,7 +1712,7 @@ function Start-RollbackVMJob {
             if ($moveVM) {
                 Write-Log -severityLevel Info -logMessage "Starting VM Rollback Migration for '$($vm.Name)'."
                 Write-Log -severityLevel Debug -logMessage "VM migration spec:`n$($moveParameters | Out-String)"
-                $null = Confirm-ActiveTasks -vm $vm -viConnection $viConn -waitTasks -WhatIf:$WhatIf
+                $null = Confirm-ActiveTasks -vm $vm -viConnection $srcViConn -waitTasks -WhatIf:$WhatIf
                 $vm = Move-VM @moveParameters
         
                 #check to restore resource pool that VM originally lived in
@@ -1652,26 +1721,27 @@ function Start-RollbackVMJob {
                         VM = $vm
                         Destination = $respool
                         Confirm = $false
-                        Server = $viConn
+                        Server = $tgtViConn
                         WhatIf = $WhatIf
                         ErrorAction = "Stop"
                     }
                     Write-Log -severityLevel Info -logMessage "Restoring VM '$($vm.Name)' to resource pool '$($respool.Name)'."
-                    $null = Confirm-ActiveTasks -vm $vm -viConnection $viConn -waitTasks -WhatIf:$WhatIf
+                    $null = Confirm-ActiveTasks -vm $vm -viConnection $tgtViConn -waitTasks -WhatIf:$WhatIf
                     $vm = Move-VM @moveParameters
                 }
             }
             #revert snapshot on VM
             Write-Log -severityLevel Info -logMessage "Reverting to pre-migration snapshot on '$($vm.Name)' with name '$($snapshot.Name)'."
-            $null = Confirm-ActiveTasks -vm $vm -viConnection $viConn -waitTasks -WhatIf:$WhatIf
+            $null = Confirm-ActiveTasks -vm $vm -viConnection $tgtViConn -waitTasks -WhatIf:$WhatIf
+            $snapshot = Get-Snapshot -Name $snapshotName -Server $tgtViConn -VM $vm
             $null = Set-VM -VM $vm -Snapshot $snapshot -Confirm:$false -WhatIf:$WhatIf -ErrorAction Stop
             Write-Log -severityLevel Info -logMessage "Successfully reverted to pre-migration snapshot on '$($vm.Name)'."
                     
             #start the VM and wait for VM tools
             if ($vamtPowerOnIfRollback) {
                 Write-Log -severityLevel Info -logMessage "Powering on '$($vm.Name)'."
-                $null = Confirm-ActiveTasks -vm $vm -viConnection $viConn -waitTasks -WhatIf:$WhatIf
-                $vm = Start-VM -VM $vm -Server $viConn -Confirm:$false -WhatIf:$WhatIf
+                $null = Confirm-ActiveTasks -vm $vm -viConnection $tgtViConn -waitTasks -WhatIf:$WhatIf
+                $vm = Start-VM -VM $vm -Server $tgtViConn -Confirm:$false -WhatIf:$WhatIf
                 if (!$WhatIf -and !$vamtIgnoreVmTools) {
                     Write-Log -severityLevel Info -logMessage "Waiting for VMware Tools..."
                     #Adding sleep to avoid VMtools not installed issue
@@ -1681,11 +1751,11 @@ function Start-RollbackVMJob {
             }
 
             #change tag to complete
-            $null = Confirm-ActiveTasks -vm $vm -viConnection $viConn -waitTasks -WhatIf:$WhatIf
-            $null = Set-VMStateTag -vm $vm -tagName $vamtTagDetails.rollbackTagName -stateTagsCatName $vamtTagDetails.tagCatName -WhatIf:$WhatIf -viConn $viConn
+            $null = Confirm-ActiveTasks -vm $vm -viConnection $tgtViConn -waitTasks -WhatIf:$WhatIf
+            $null = Set-VMStateTag -vm $vm -tagName $vamtTagDetails.rollbackTagName -stateTagsCatName $vamtTagDetails.tagCatName -WhatIf:$WhatIf -viConn $tgtViConn
 
             Write-Log -severityLevel Info -logMessage "Rollback of '$($vm.Name)' completed successfully."
-            try { Disconnect-VIServer $viConn -Confirm:$false } catch {}
+            try { Disconnect-VIServer * -Confirm:$false } catch {}
 
             return [PSCustomObject]@{
                 result = "Successfully rolled back VM '$($vm.Name)'."
@@ -1697,7 +1767,7 @@ function Start-RollbackVMJob {
             try { Disconnect-VIServer * -Confirm:$false } catch {}
             throw $_
         }
-    } -InitializationScript ([scriptblock]::Create($jobFunctions)) -ArgumentList($viConn,$vm,$vmhost,$respool,$portgroup,$vmfolder,$datastore,$cred,$snapshot,$retry,$test,$scriptVars)
+    } -InitializationScript ([scriptblock]::Create($jobFunctions)) -ArgumentList($srcViConn,$tgtViConn,$vm,$vmhost,$respool,$network,$vmfolder,$datastore,$cred,$snapshot,$retry,$test,$scriptVars)
 
     return $rollbackJob 
 }

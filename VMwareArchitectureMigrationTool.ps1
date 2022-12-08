@@ -233,6 +233,7 @@ $cleanupCompleteStates = @($jobComplete, $jobCompleteWithErrors, $jobFailed)
 #inputs csv header defs
 $inputHeaders = @{
     name = "vmname"
+    vcenter = "target_vc"
     compute = "target_hostpoolcluster"
     network = "target_portgroup"
     storage = "target_datastore"
@@ -428,7 +429,7 @@ if ($action -in @("migrate","rollback")) {
                     }
                 } elseif ($job.State -eq $jobFailed) {
                     Write-Log -severityLevel Error "VM move job for '$($_.tgt_vm.Name)' failed with errors:`n$($job.Error.Exception.Message -join "`n")"
-                    if (!!$job.Error -and $job.Error.ToString() -match $retryErrors) {
+                    if (!!$job.Error -and ($job.Error.ToString() -match $retryErrors)) {
                         if ($_.attempts -lt $jobRetries) {
                             Write-Log -severityLevel Warn -logMessage "Error is eligible to be re-tried. Setting retry status to try again later for '$($_.tgt_vm.Name)'."
                             $_.job_state = "failed_pendingRetry"
@@ -486,9 +487,10 @@ if ($action -in @("migrate","rollback")) {
             Write-Log -severityLevel Info -logMessage "New batch of moves: $($batch.tgt_vm.Name -join ", ")"
             $batch | %{
                 $vm = $_.tgt_vm
-                $viConn = $viConnections | ?{$_.Id -eq ($vm.Uid -Split 'VirtualMachine' | Select -First 1)}
+                $srcViConn = $_.src_vcenter
+                $tgtViConn = $_.tgt_vcenter
 
-                [array]$activeTasks = Confirm-ActiveTasks -vm $vm -viConnection $viConn
+                [array]$activeTasks = Confirm-ActiveTasks -vm $vm -viConnection $srcViConn
                 if ($null -ne $activeTasks) {
                     if ($_.attempts -lt $jobRetries) {
                         Write-Log -severityLevel Warn -logMessage "VM ($($vm.Name)) has $($activeTasks.count) active task(s) already. Setting retry status to try again later."
@@ -498,25 +500,31 @@ if ($action -in @("migrate","rollback")) {
                         $_.job_state = $jobFailed
                         $_.job = "Failed waiting for active tasks on VM to complete. Exhausted all $jobRetries retries."
                         Write-Log -severityLevel Error -logMessage "VM ($($vm.Name)) failed with error: $($_.job)"
-                        $_.tag_state = Set-VMStateTag -vm $vm -tagName $vamtTagDetails.failedTagName -stateTagsCatName $vamtTagDetails.tagCatName -WhatIf:(!!$WhatIf) -viConn $viConn
+                        $_.tag_state = Set-VMStateTag -vm $vm -tagName $vamtTagDetails.failedTagName -stateTagsCatName $vamtTagDetails.tagCatName -WhatIf:(!!$WhatIf) -viConn $viConnections
                     }
                     return
                 }
-                if ($null -eq $vcCredential) {
-                    $vcCredential = Get-StoredCredential -credName $viConn.name -credentialDirectory $vamtCredentialDirectory
+                if ($null -eq $srcVcCredential) {
+                    $srcVcCredential = Get-StoredCredential -credName $srcViConn.name -credentialDirectory $vamtCredentialDirectory
+                }
+                if ($null -eq $tgtVcCredential) {
+                    $tgtVcCredential = Get-StoredCredential -credName $tgtViConn.name -credentialDirectory $vamtCredentialDirectory
                 }
                 $jobParams = @{
-                    viConn = $viConn
+                    srcViConn = $srcViConn
+                    tgtViConn = $tgtViConn
                     vm = $vm
+                    network = $_.tgt_network
                     WhatIf = !!$WhatIf
                     isRetry = ($_.attempts -gt 0)
-                    cred = $vcCredential
+                    srcCred = $srcVcCredential
+                    tgtCred = $tgtVcCredential
                     scriptVars = $scriptVars
                 }
                 if ($action -eq "migrate") {
-                    $_.job = Start-MigrateVMJob @jobParams -compute $_.tgt_compute -network $_.tgt_network -storage $_.tgt_storage
+                    $_.job = Start-MigrateVMJob @jobParams -compute $_.tgt_compute -storage $_.tgt_storage
                 } elseif ($action -eq "rollback") {
-                    $_.job = Start-RollbackVMJob @jobParams -vmhost $_.tgt_host -respool $_.tgt_respool -portgroup $_.tgt_network -vmfolder $_.tgt_folder -datastore $_.tgt_datastore -snapshot $_.tgt_snapshot
+                    $_.job = Start-RollbackVMJob @jobParams -vmhost $_.tgt_host -respool $_.tgt_respool -vmfolder $_.tgt_folder -datastore $_.tgt_datastore -snapshot $_.tgt_snapshot
                 }
                 $_.job_state = $jobInProgress
                 $_.attempts++
