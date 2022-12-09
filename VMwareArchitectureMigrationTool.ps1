@@ -7,7 +7,7 @@
     ===========================================================================
     .SYNOPSIS
         The VMware Architecture Migration Tool is designed to provide an easy and automated process to 
-        migrate machines between clusters of different architecture types within the same or linked vCenters.
+        migrate machines between clusters of different architecture types within the same or co-located vCenters.
     .DESCRIPTION
         Script that performs cold migration on VMs between two compute environments during a specified change window.
     .EXAMPLE
@@ -45,9 +45,10 @@ param(
     [ValidateNotNullOrEmpty()]
     [String[]]$vCenters,
 
-    [Parameter()] <# Optional: If not set, the user will be prompted for a credential and that credential will be stored (encrypted) on the filesystem. #>
+    [Parameter()] <# Optional: If not set, the user will be prompted for a credential and that credential will be stored (encrypted) on the filesystem. 
+                    Note: This is an ordered list that will correspond to the vCenters intput. You can pass 1 credential for all vCenters, or 1 credential per vCenter.#>
     [ValidateNotNullOrEmpty()]
-    [PSCredential]$vcCredential,
+    [PSCredential[]]$vcCredentials,
 
     [Parameter()] <# "6/9/2022 9:16:58" #>
     [ValidateNotNullOrEmpty()]
@@ -111,6 +112,29 @@ param(
 #region Script Variables
 #
 #############################################################################################################################
+
+#Validate vCenters input
+if ($vCenters.count -ne $($vCenters.toLower() | Select -Unique).count) {
+    throw "Duplicate vCenters found in 'vCenters' inputs."
+}
+
+#Validate vC Credentials and create cred Hash Table
+if (($null -eq $vcCredentials) -or ($vcCredentials.count -eq 1) -or ($vcCredentials.count -eq $vCenters.count)) {
+    $vcCredentialTable = @{}
+    if ($null -ne $vcCredentials) {
+        $index = 0
+        foreach ($vCenter in $vCenters) {
+            if ($vcCredentials.count -eq 1) {
+                $vcCredentialTable.Add($vCenter,$vcCredentials[0])
+            } else {
+                $vcCredentialTable.Add($vCenter,$vcCredentials[$index])
+            }
+            $index++
+        }
+    }
+} else {
+    throw "Failed vCenter Credential validation. You must either pass 1 credential for all vCenters; Or 1 credential per vCenter; Or no credentials (local lookup will occur) - $(Get-Date)"
+}
 
 #logging variables
 if (![string]::IsNullOrWhiteSpace($syslogHost)) {
@@ -327,8 +351,9 @@ if ($authenticatedEmail) {
 
 #First clear any active or stale VI Connections from this session.
 try { Disconnect-VIServer * -Confirm:$false } catch {}
-$viConnections = Initialize-VIServer -vCenters $vCenters -cred $vcCredential -credentialDirectory $vamtCredentialDirectory
-
+$viConnections = $vCenters | %{
+    Initialize-VIServer -vCenters $_ -Credential $vcCredentialTable[$_] -credentialDirectory $vamtCredentialDirectory
+}
 #Validate that all Tags and Categories required for the migration exist in all specified vCenters.
 Confirm-Tags -tagDetails $vamtTagDetails -viConnections $viConnections
 
@@ -504,9 +529,11 @@ if ($action -in @("migrate","rollback")) {
                     }
                     return
                 }
+                $srcVcCredential = $vcCredentialTable[$srcViConn.Name]
                 if ($null -eq $srcVcCredential) {
                     $srcVcCredential = Get-StoredCredential -credName $srcViConn.name -credentialDirectory $vamtCredentialDirectory
                 }
+                $tgtVcCredential = $vcCredentialTable[$tgtViConn.Name]
                 if ($null -eq $tgtVcCredential) {
                     $tgtVcCredential = Get-StoredCredential -credName $tgtViConn.name -credentialDirectory $vamtCredentialDirectory
                 }
@@ -613,6 +640,7 @@ if ($action -in @("migrate","rollback")) {
                     }
                     return
                 }
+                $vcCredential = $vcCredentialTable[$viConn.Name]
                 if ($null -eq $vcCredential) {
                     $vcCredential = Get-StoredCredential -credName $viConn.name -credentialDirectory $vamtCredentialDirectory
                 }

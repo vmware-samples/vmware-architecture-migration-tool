@@ -21,19 +21,19 @@ function Initialize-VIServer {
         [ValidateNotNullOrEmpty()]
         [String[]]$vCenters,
         [Parameter()]
-        [PSCredential]$cred,
+        [PSCredential]$Credential,
         [Parameter()]
         [String]$credentialDirectory
     )
     $connections = @()
     foreach ($vCenter in $vCenters) {
         try {
-            if ($null -eq $cred) {
+            if ($null -eq $Credential) {
                 Write-Log -severityLevel Debug -logMessage "No credential for vCenter $vCenter was passed in via input parameter. Starting stored credential retrieval."
                 $cred = Get-StoredCredential -credName $vCenter -credentialDirectory $credentialDirectory
             } else {
                 Write-Log -severityLevel Debug -logMessage "Credential for vCenter $vCenter with Username $($cred.UserName) was passed in via input parameter. Overwriting stored credential."
-                $cred = Save-Credential -credName $vCenter -cred $cred -credentialDirectory $credentialDirectory
+                $cred = Save-Credential -credName $vCenter -cred $Credential -credentialDirectory $credentialDirectory
             }
             Write-Log -severityLevel Info -logMessage "Logging in to vCenter $vCenter with User: $($cred.UserName)"
             $connection = Connect-VIServer $vCenter -Credential $cred -ErrorAction Stop
@@ -139,7 +139,7 @@ function Write-Log {
         $Script:PSDefaultParameterValues = $logDefaults
     }
 
-    if(!(Test-Path $logDir)){
+    if(![string]::IsNullOrEmpty($logDir) -and !(Test-Path $logDir)){
         Write-Host "Logging directory for current execution ($logDir) was not found. Creating directory now. - $(Get-Date)" -foregroundColor Cyan
         New-Item -Path $logDir -ItemType Directory -Force | Out-Null
     }
