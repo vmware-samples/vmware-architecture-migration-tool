@@ -1421,7 +1421,7 @@ function Start-MigrateVMJob {
                                 throw "Shutdown of VM '$($vm.Name)' has timed out and force shutdown is disabled. Considering this job failed."
                             }
                             Write-Log -severityLevel Warn -logMessage "Shutdown of VM '$($vm.Name)' has timed out. Forcing poweroff now."
-                            $vm = Stop-VM -VM $vm -Server $viConn -Confirm:$false
+                            $vm = Stop-VM -VM $vm -Server $srcViConn -Confirm:$false
                         }
                         $vm = Get-VM -Id $vm.Id -Server $srcViConn #refresh VM object
                     }

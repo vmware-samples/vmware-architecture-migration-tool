@@ -668,6 +668,21 @@ $currentTime = Get-Date
 $finalMessage = "Script run summary:`n`tScript start: '$vamtScriptLaunchTime'"
 $finalMessage += "`n`tScript runtime: $(($currentTime - $vamtScriptLaunchTime).Minutes) minutes"
 $finalMessage += "`n`tScript completion: '$currentTime'"
+$finalMessage += "`n`tTotal VM targets in migration run: $($finalObj.count)"
+$notAttemptedCount = 0
+$finalObj.job_state | select -Unique | %{
+    $state = $_
+    $jobs = $finalObj | ?{$_.job_state -eq $state}
+    if ($state -notin $jobStates.Values) {
+        $finalMessage += "`n`tVM migration jobs with final status '$state': $($jobs.count)"
+    } else {
+        $notAttemptedCount += $jobs.count
+    }
+}
+if ($notAttemptedCount -gt 0) {
+    $finalMessage += "`n`tVM migration jobs Not Attempted: $notAttemptedCount"
+}
+
 
 Write-Log -severityLevel Info -logMessage $finalMessage
 Write-Log -severityLevel Info -logMessage "Final report:`n$($finalObj | ft | Out-String)"
