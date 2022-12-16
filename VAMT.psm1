@@ -20,27 +20,34 @@ function Initialize-VIServer {
         [Parameter(Mandatory)]
         [ValidateNotNullOrEmpty()]
         [String[]]$vCenters,
-        [Parameter()]
+        [Parameter()] #Optional if credentialDirectory is provided.
         [PSCredential]$Credential,
-        [Parameter()]
+        [Parameter()] #Optional if Credential is provided.
         [String]$credentialDirectory
     )
+
+    if ($null -eq $Credential -and $null -eq $credentialDirectory) {
+        throw "Both Inputs 'Credential' and 'credentialDirectory' are empty. 1 OR Both are required for this function to work."
+    }
+
     $connections = @()
     foreach ($vCenter in $vCenters) {
         try {
             if ($null -eq $Credential) {
                 Write-Log -severityLevel Debug -logMessage "No credential for vCenter $vCenter was passed in via input parameter. Starting stored credential retrieval."
                 $cred = Get-StoredCredential -credName $vCenter -credentialDirectory $credentialDirectory
-            } else {
+            } elseif (![string]::IsNullOrEmpty($credentialDirectory)) {
                 Write-Log -severityLevel Debug -logMessage "Credential for vCenter $vCenter with Username $($cred.UserName) was passed in via input parameter. Overwriting stored credential."
                 $cred = Save-Credential -credName $vCenter -cred $Credential -credentialDirectory $credentialDirectory
+            } else {
+                $cred = $Credential
             }
             Write-Log -severityLevel Info -logMessage "Logging in to vCenter $vCenter with User: $($cred.UserName)"
             $connection = Connect-VIServer $vCenter -Credential $cred -ErrorAction Stop
             $connections += $connection
         } catch {
             Write-Log -severityLevel Error -logMessage "Failed to connect to $vCenter with the following Error:`n`t$($_.Exception.innerexception.message)"
-            Write-Log -severityLevel Warn -logMessage "In the case of expired/incorrect credentials, you can clear the credential file used to connect to vCenter located here: $credentialDirectory"
+            Write-Log -severityLevel Warn -logMessage "In the case of expired/incorrect stored credentials, you can clear the credential file used to connect to vCenter located here: $credentialDirectory"
             Write-Log -severityLevel Warn -logMessage "Cleaning up and exiting the execution."
             try { Disconnect-VIServer * -Confirm:$false } catch {}
             throw $_
@@ -752,7 +759,8 @@ function Confirm-MigrationTargets {
         [Switch]$ignoreVmTools
     )
     #Check that all VMs and target locations listed in input file are valid
-    $missingvCenters = $inputs."$($inputHeaders.vcenter)".ToLower() | select -Unique | ?{$_ -notin $viConnections.Name.ToLower()}
+    $targetVcNames = $inputs."$($inputHeaders.vcenter)".ToLower() | select -Unique
+    $missingvCenters = $targetVcNames | ?{$_ -notin $viConnections.Name.ToLower()}
     if ($missingvCenters.Length -gt 0) {
         $missingMessage = "The following vCenters specified in the input CSV are missing from the 'vCenters' input:$($missingvCenters -join ', ')"
         Write-Log -severityLevel Error -logMessage $missingMessage
@@ -763,7 +771,11 @@ function Confirm-MigrationTargets {
     $missingVMs = $vmValidationResult.missingVMs
     $vms = $vmValidationResult.vms
 
-    $cmptValidationResult = Confirm-Computes -computeNames $inputs."$($inputHeaders.compute)" -computeType All -viConnection $viConnections
+    #This partially addresses a known limitation of this verification. The limitation is that this code will only validate that exactly
+    #1 instance of the specified Cluster/Pool/Host for the target location exists. If the same Pool/Cluster names exist in more than 1 target vC,
+    #This validation will fail. This could be addressed with enhanced logic but this could be very environment specific.
+    $targetVCs = $targetVcNames | %{ $vcName = $_; $viConnections | ?{$_.Name.ToLower() -eq $vcName}}
+    $cmptValidationResult = Confirm-Computes -computeNames $inputs."$($inputHeaders.compute)" -computeType All -viConnection $targetVCs
     $missingComputes = $cmptValidationResult.missingComputes
     $computes = $cmptValidationResult.computes
 
@@ -928,9 +940,8 @@ function Confirm-RollbackTargets {
         [Parameter()]
         [Switch]$ignoreVmTools
     )
+
     #Check that all VMs listed in input file are valid
-
-
     $vmValidationResult = Confirm-VMs -vmNames $inputs."$($inputHeaders.name)" -viConnection $viConnections
     $missingVMs = $vmValidationResult.missingVMs
     $vms = $vmValidationResult.vms
@@ -1333,7 +1344,9 @@ function Start-MigrateVMJob {
             #Current support is for only 1 source and target Datastore - rollback will result in all disks rolled back to original OS disk Datastore
             $currentDsId = (Get-HardDisk -VM $vm | sort -Property Name | Select -First 1).ExtensionData.Backing.Datastore.ToString()
             #Current support is for only 1 source and target PortGroup - rollback will result first network being rolled back to original Portgroup. All others disconnected.
-            $currentPgId = ($vm | Get-View | Select -ExpandProperty Network | Select -First 1).ToString()
+            #$currentPgId = ($vm | Get-View | Select -ExpandProperty Network | Select -First 1).ToString()
+            $firstAdapterNetName = (Get-NetworkAdapter -VM $vm | sort -Property Name | Select -First 1).NetworkName
+            $currentPgId = ($vm.ExtensionData | Select -ExpandProperty Network | ?{ (Get-View -Id $_.ToString()).Name -eq $firstAdapterNetName }).ToString()
 
             #Setup Move targets and validate move is needed.
             $moveParameters = @{

@@ -1,0 +1,3 @@
+﻿vmname,target_vc,target_hostpoolcluster,target_portgroup,target_datastore
+Dummy-100,nestvc1.cf.local,nestesx04.cf.local,LS-10.1.101.X/24,LabNFS02
+Dummy-10,nestvc1.cf.local,TestPool,LS-10.1.102.X/24,LabNFS02
