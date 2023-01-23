@@ -1,3 +1,0 @@
-﻿vmname,target_vc,target_hostpoolcluster,target_portgroup,target_datastore
-Dummy-100,homevc1.cf.local,labesx01.cf.local,Lab-VLAN-1,LabNFS02
-Dummy-10,homevc1.cf.local,Deploying,Lab-VLAN-1,LabNFS02

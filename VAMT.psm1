@@ -691,9 +691,9 @@ function Confirm-Computes {
         [String[]]$computeNames
     )
     $missingComputes = @()
-    $hostViews = Get-View -ViewType HostSystem -Server $viConnection
-    $clusterViews = Get-View -ViewType ClusterComputeResource -Server $viConnection
-    $rpViews = Get-View -ViewType ResourcePool -Server $viConnection
+    [array]$hostViews = Get-View -ViewType HostSystem -Server $viConnection
+    [array]$clusterViews = Get-View -ViewType ClusterComputeResource -Server $viConnection
+    [array]$rpViews = Get-View -ViewType ResourcePool -Server $viConnection
     $computeViews = @()
     if (!$computeType -or $computeType -eq "All") {
         $computeViews = ($hostViews + $clusterViews + $rpViews)
@@ -1357,10 +1357,10 @@ function Start-MigrateVMJob {
                 ErrorAction = "Stop"
             }
             $currentStorage = Get-View -id $currentDsId -Server $srcViConn
-            if ($storage.Id -notin @($currentDsId, $currentStorage.Parent.ToString())) {
+            if ($tgtViConn.InstanceUuid -ne $srcViConn.InstanceUuid -or $storage.Id -notin @($currentDsId, $currentStorage.Parent.ToString())) {
                 $moveParameters.Datastore = $storage
             }
-            if ($currentPgId -ne $network.Id) {
+            if ($tgtViConn.InstanceUuid -ne $srcViConn.InstanceUuid -or $currentPgId -ne $network.Id) {
                 if ($null -ne $network.NetworkType) {
                     $moveParameters.Network = $network
                 } else {
@@ -1368,7 +1368,7 @@ function Start-MigrateVMJob {
                 }
             }
             $currentResPool = Get-VIObjectByVIView -MORef $currentRpId -Server $srcViConn
-            if ($compute.Id -notin @($currentHostId, $currentRpId, $currentResPool.ExtensionData.Owner.ToString())) {
+            if ($tgtViConn.InstanceUuid -ne $srcViConn.InstanceUuid -or $compute.Id -notin @($currentHostId, $currentRpId, $currentResPool.ExtensionData.Owner.ToString())) {
                 if ($compute.ExtensionData.MoRef.Type -eq "ClusterComputeResource") {
                     $tgtCompute = Get-VMHost -Location $compute | ?{$_.ConnectionState -eq "Connected"} | Get-Random
                 } elseif ($compute.ExtensionData.MoRef.Type -eq "ResourcePool") {
