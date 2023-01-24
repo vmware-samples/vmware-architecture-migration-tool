@@ -1,0 +1,75 @@
+[
+    {
+      "vmname": "candidatevm1",
+      "target_vc": "vc1.corp.local",
+      "target_hostpoolcluster": "NewCluster",
+      "target_portgroup": [
+        "VLAN-16",
+        "VLAN-10"
+      ],
+      "target_datastore": [
+        "DatastoreCluster",
+        "DatastoreCluster"
+      ]
+    },
+    {
+      "vmname": "candidatevm2",
+      "target_vc": "vc1.corp.local",
+      "target_hostpoolcluster": "NewCluster",
+      "target_portgroup": [
+        "VLAN-16",
+        "VLAN-10"
+      ],
+      "target_datastore": [
+        "NFS02",
+        "NFS01"
+      ]
+    },
+    {
+      "vmname": "candidatevm3",
+      "target_vc": "vc1.corp.local",
+      "target_hostpoolcluster": "resourcePool1",
+      "target_portgroup": [
+        "VLAN-16",
+        "VLAN-10"
+      ],
+      "target_datastore": [
+        "NFS02"
+      ]
+    },
+    {
+      "vmname": "candidatevm4",
+      "target_vc": "vc1.corp.local",
+      "target_hostpoolcluster": "OtherCluster",
+      "target_portgroup": [
+        "VLAN-10",
+        "VLAN-16"
+      ],
+      "target_datastore": [
+        "NFS01"
+      ]
+    },
+    {
+      "vmname": "candidatevm5",
+      "target_vc": "vc1.corp.local",
+      "target_hostpoolcluster": "OtherCluster",
+      "target_portgroup": [
+        "LS-10.1.102.X/24",
+        "VLAN-10"
+      ],
+      "target_datastore": [
+        "NFS02"
+      ]
+    },
+    {
+      "vmname": "candidatevm6",
+      "target_vc": "vc1.corp.local",
+      "target_hostpoolcluster": "esx01.corp.local",
+      "target_portgroup": [
+        "VM Network"
+      ],
+      "target_datastore": [
+        "NFS01"
+      ]
+    }
+  ]

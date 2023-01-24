@@ -305,9 +305,22 @@ Write-Log -logDefaults $PSDefaultParameterValues -severityLevel Info -logMessage
 #validate inputs
 Write-Log -severityLevel Info -logMessage "Beginning inputs file validation."
 try {
-    $inputs = Import-Csv -Path $inputFilePath
+    if ( [IO.Path]::GetExtension($inputFilePath).ToLower() -eq ".json" ) {
+        $inputs = Get-Content -Raw -Path $inputFilePath | ConvertFrom-Json
+    } elseif ( [IO.Path]::GetExtension($inputFilePath).ToLower() -eq ".csv" ) {
+        $inputs = Import-Csv -Path $inputFilePath
+    } else {
+        #No file extension found.
+        try {
+            #try json first since it will throw an exception on invalid parse
+            $inputs = Get-Content -Raw -Path $inputFilePath | ConvertFrom-Json
+        } catch {
+            #failed to parse as a json file to try to import as csv. Issues will be flushed out in validation below.
+            $inputs = Import-Csv -Path $inputFilePath
+        }
+    }    
 } catch {
-    Write-Log -severityLevel Error -logMessage "Failed to import inputs CSV file located at '$inputFilePath'. Error:`n`t$($_.Exception.message)"
+    Write-Log -severityLevel Error -logMessage "Failed to import inputs file located at '$inputFilePath'. Error:`n`t$($_.Exception.message)"
     throw $_
 }
 
@@ -315,16 +328,17 @@ $errorLines = @()
 $inputs | %{
     if (
         [String]::IsNullOrWhiteSpace($_."$($inputHeaders.name)") -or
+        [String]::IsNullOrWhiteSpace($_."$($inputHeaders.vcenter)") -or
         [String]::IsNullOrWhiteSpace($_."$($inputHeaders.compute)") -or
         [String]::IsNullOrWhiteSpace($_."$($inputHeaders.network)") -or
         [String]::IsNullOrWhiteSpace($_."$($inputHeaders.storage)")
     ) {
-        $errorLines += [String]($inputs.IndexOf($_)+2)
+        $errorLines += [String]($inputs.IndexOf($_)+1)
     }
 }
 
 if ($errorLines.Length -gt 0) {
-    $message = "Missing data detected on lines ($($errorLines -join ', ')) in inputs CSV file."
+    $message = "Missing data detected on object/line(s) ($($errorLines -join ', ')) in inputs file."
     Write-Log -severityLevel Error -logMessage $message
     throw $message
 }
@@ -337,7 +351,7 @@ if ($duplicates.InputObject.Length -gt 0) {
     throw $message
 }
 
-Write-Log -severityLevel Info -logMessage "Inputs CSV file successfully validated for completeness."
+Write-Log -severityLevel Info -logMessage "Inputs file successfully validated for completeness."
 
 #Setup and validate email credential
 if ($authenticatedEmail) {

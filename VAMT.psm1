@@ -794,8 +794,8 @@ function Confirm-MigrationTargets {
         $vmName = $_."$($inputHeaders.name)"
         $vCenterName = $_."$($inputHeaders.vcenter)"
         $computeName = $_."$($inputHeaders.compute)"
-        $networkName = $_."$($inputHeaders.network)"
-        $storageName = $_."$($inputHeaders.storage)"
+        $networkNames = $_."$($inputHeaders.network)"
+        $storageNames = $_."$($inputHeaders.storage)"
 
         $vmObj = $vms | ?{$_.Name -eq $vmName}
         $srcViConn = $viConnections | ?{$_.Id -eq ($vmObj.Uid -Split 'VirtualMachine' | Select -First 1)}
@@ -809,17 +809,20 @@ function Confirm-MigrationTargets {
         $computeView.updateviewdata('Network.*','Datastore.*')
         $networkViews = $computeView.LinkedView.Network
 
-        $networkView = $networkViews | ?{$_.Name -eq $networkName}
+        $networkView = $networkViews | ?{$_.Name -in $networkNames}
+
+
+        
         if (!!$networkView) {
             if ($networkView.Length -gt 1) {
-                Write-Log -severityLevel Warn -logMessage "$($networkView.Length) networks were found with name ($networkName) and type(s) ($(($networkView.MoRef.Type | Sort | Get-Unique) -join ', ')) within Compute ($computeName)."
-                $missingPortGroups += $networkName
+                Write-Log -severityLevel Warn -logMessage "$($networkView.Length) networks were found with name ($networkNames) and type(s) ($(($networkView.MoRef.Type | Sort | Get-Unique) -join ', ')) within Compute ($computeName)."
+                $missingPortGroups += $networkNames
             } else {
                 $networkObj = Get-VIObjectByVIView -VIView $networkView
             }
         } else {
-            Write-Log -severityLevel Warn -logMessage "No networks were found with name ($networkName) within Compute ($computeName)."
-            $missingPortGroups += $networkName
+            Write-Log -severityLevel Warn -logMessage "No networks were found with name ($networkNames) within Compute ($computeName)."
+            $missingPortGroups += $networkNames
         }
 
         $datastoreViews = $computeView.LinkedView.Datastore
@@ -829,17 +832,17 @@ function Confirm-MigrationTargets {
                 $_.LinkedView.Parent
             }
         } | Sort -Property Name -Unique
-        $storageView = ($datastoreViews + $dscViews) | ?{$_.Name -eq $storageName}
+        $storageView = ($datastoreViews + $dscViews) | ?{$_.Name -eq $storageNames}
         if (!!$storageView) {
             if ($storageView.Length -gt 1) {
-                Write-Log -severityLevel Warn -logMessage "$($storageView.Length) Datastores or DSCs were found with name ($storageName) and type(s) ($(($storageView.MoRef.Type | Sort | Get-Unique) -join ', ')) within Compute ($computeName)."
-                $missingStorage += $storageName
+                Write-Log -severityLevel Warn -logMessage "$($storageView.Length) Datastores or DSCs were found with name ($storageNames) and type(s) ($(($storageView.MoRef.Type | Sort | Get-Unique) -join ', ')) within Compute ($computeName)."
+                $missingStorage += $storageNames
             } else {
                 $storageObj = Get-VIObjectByVIView -VIView $storageView
             }
         } else {
-            Write-Log -severityLevel Warn -logMessage "No Datastores or DSCs were found with name ($storageName) within Compute ($computeName)."
-            $missingStorage += $storageName
+            Write-Log -severityLevel Warn -logMessage "No Datastores or DSCs were found with name ($storageNames) within Compute ($computeName)."
+            $missingStorage += $storageNames
         }
 
         $validationErrors = @()
