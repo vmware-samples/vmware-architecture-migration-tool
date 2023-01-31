@@ -293,6 +293,7 @@ Import-Module -Name "$vamtWorkingDirectory/VAMT.psm1"
 $PSDefaultParameterValues = @{
     'Write-Log:logDir' = $vamtLoggingDirectory
     'Write-Log:logFileNamePrefix' = $vamtAction
+    'Write-Log:debugLogging' = $vamtDebugLogging
 }
 if (![string]::IsNullOrEmpty($vamtSyslogServer)) {
     $PSDefaultParameterValues.Add('Write-Log:syslogServer', $vamtSyslogServer)
@@ -306,14 +307,14 @@ Write-Log -logDefaults $PSDefaultParameterValues -severityLevel Info -logMessage
 Write-Log -severityLevel Info -logMessage "Beginning inputs file validation."
 try {
     if ( [IO.Path]::GetExtension($inputFilePath).ToLower() -eq ".json" ) {
-        $inputs = Get-Content -Raw -Path $inputFilePath | ConvertFrom-Json
+        $inputs = Get-Content -Raw -Path $inputFilePath | ConvertFrom-Json -ErrorAction Stop
     } elseif ( [IO.Path]::GetExtension($inputFilePath).ToLower() -eq ".csv" ) {
         $inputs = Import-Csv -Path $inputFilePath
     } else {
         #No file extension found.
         try {
             #try json first since it will throw an exception on invalid parse
-            $inputs = Get-Content -Raw -Path $inputFilePath | ConvertFrom-Json
+            $inputs = Get-Content -Raw -Path $inputFilePath | ConvertFrom-Json -ErrorAction Stop
         } catch {
             #failed to parse as a json file to try to import as csv. Issues will be flushed out in validation below.
             $inputs = Import-Csv -Path $inputFilePath
@@ -543,14 +544,7 @@ if ($action -in @("migrate","rollback")) {
                     }
                     return
                 }
-                $srcVcCredential = $vcCredentialTable[$srcViConn.Name]
-                if ($null -eq $srcVcCredential) {
-                    $srcVcCredential = Get-StoredCredential -credName $srcViConn.name -credentialDirectory $vamtCredentialDirectory
-                }
-                $tgtVcCredential = $vcCredentialTable[$tgtViConn.Name]
-                if ($null -eq $tgtVcCredential) {
-                    $tgtVcCredential = Get-StoredCredential -credName $tgtViConn.name -credentialDirectory $vamtCredentialDirectory
-                }
+
                 $jobParams = @{
                     srcViConn = $srcViConn
                     tgtViConn = $tgtViConn
@@ -558,8 +552,6 @@ if ($action -in @("migrate","rollback")) {
                     network = $_.tgt_network
                     WhatIf = !!$WhatIf
                     isRetry = ($_.attempts -gt 0)
-                    srcCred = $srcVcCredential
-                    tgtCred = $tgtVcCredential
                     scriptVars = $scriptVars
                 }
                 if ($action -eq "migrate") {
@@ -654,11 +646,7 @@ if ($action -in @("migrate","rollback")) {
                     }
                     return
                 }
-                $vcCredential = $vcCredentialTable[$viConn.Name]
-                if ($null -eq $vcCredential) {
-                    $vcCredential = Get-StoredCredential -credName $viConn.name -credentialDirectory $vamtCredentialDirectory
-                }
-                $_.job = Start-CleanupVMJob -viConn $viConn -vm $vm -snapshot $_.clean_snapshot -cred $vcCredential -scriptVars $scriptVars -WhatIf:(!!$WhatIf)
+                $_.job = Start-CleanupVMJob -viConn $viConn -vm $vm -snapshot $_.clean_snapshot -scriptVars $scriptVars -WhatIf:(!!$WhatIf)
                 $_.job_state = $jobInProgress
                 $_.attempts++
             }

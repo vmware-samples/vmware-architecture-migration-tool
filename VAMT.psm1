@@ -1,4 +1,4 @@
-<#
+﻿<#
     .NOTES
     ===========================================================================
      Created by:    Austin Browder
@@ -44,6 +44,8 @@ function Initialize-VIServer {
             }
             Write-Log -severityLevel Info -logMessage "Logging in to vCenter $vCenter with User: $($cred.UserName)"
             $connection = Connect-VIServer $vCenter -Credential $cred -ErrorAction Stop
+            #extend the vIConnection to contain the credential used to connect it. This can be used later rather than retrieving the credential again if the session needs to be recreated (i.e. in a job)
+            $connection | Add-Member NoteProperty -Name Credential -Value $cred -Force
             $connections += $connection
         } catch {
             Write-Log -severityLevel Error -logMessage "Failed to connect to $vCenter with the following Error:`n`t$($_.Exception.innerexception.message)"
@@ -54,6 +56,248 @@ function Initialize-VIServer {
         }
     }
     return $connections
+}
+
+function Invoke-Move {
+    param(
+        [Parameter(Mandatory)]
+        [ValidateNotNullOrEmpty()]
+        [VMware.VimAutomation.ViCore.Types.V1.Inventory.VirtualMachine[]]$vm,
+
+        [Parameter(Mandatory)]
+        [ValidateNotNullOrEmpty()]
+        [VMware.VimAutomation.ViCore.Impl.V1.VIServerImpl]$Server,
+
+        [parameter()]
+        [ValidateNotNullOrEmpty()]
+        [VMware.VimAutomation.ViCore.Types.V1.Inventory.VIContainer]$Destination,
+
+        [parameter()]
+        [ValidateNotNullOrEmpty()]
+        [VMware.VimAutomation.ViCore.Types.V1.Inventory.FolderContainer]$InventoryLocation,
+
+        [parameter()]
+        [ValidateNotNullOrEmpty()]
+        [VMware.VimAutomation.ViCore.Types.V1.VirtualDevice.NetworkAdapter[]]$NetworkAdapter,
+
+        [parameter()]
+        [ValidateNotNullOrEmpty()]
+        [VMware.VimAutomation.ViCore.Types.V1.AdvancedOption[]]$AdvancedOption,
+
+        [parameter()]
+        [ValidateNotNullOrEmpty()]
+        $Network,
+
+        [parameter()]
+        [ValidateNotNullOrEmpty()]
+        [VMware.VimAutomation.ViCore.Types.V1.DatastoreManagement.StorageResource[]]$Datastore,
+
+        [Parameter()]
+        [Object]$logDefaults,
+
+        [Parameter()]
+        [Switch]$WhatIf
+    )
+    
+    if (!!$logDefaults) {
+        Write-Log -logDefaults $logDefaults -severityLevel Debug -logMessage "Starting 'Invoke-Move'."
+    }else {
+        Write-Log -severityLevel Debug -logMessage "Starting 'Invoke-Move'."
+    }
+
+    $moveParameters = @{
+        VM = $vm
+        Confirm = $false
+        Server = $Server
+        VMotionPriority = "High"
+        WhatIf = !!$WhatIf
+        ErrorAction = "Stop"
+    }
+    if ($null -ne $Destination) {
+        if ($Destination.ExtensionData.MoRef.Type -eq "ClusterComputeResource") {
+            $moveParameters.Destination = Get-VMHost -Location $compute | ?{$_.ConnectionState -eq "Connected"} | Get-Random
+        } elseif ($Destination.ExtensionData.MoRef.Type -eq "ResourcePool") {
+            $tgtCluster = Get-Cluster -Id $compute.ExtensionData.Owner.ToString() -Server $tgtViConn
+            $moveParameters.Destination = Get-VMHost -Location $tgtCluster | ?{$_.ConnectionState -eq "Connected"} | Get-Random
+        } else {
+            $moveParameters.Destination = $Destination
+        }
+    }
+    if ($null -ne $InventoryLocation) {
+        $moveParameters.InventoryLocation = $InventoryLocation
+    }
+    if ($null -ne $NetworkAdapter) {
+        $moveParameters.NetworkAdapter = $NetworkAdapter
+    }
+    if ($null -ne $AdvancedOption) {
+        $moveParameters.AdvancedOption = $AdvancedOption
+    }
+
+    #Check if we can use the Move-VM commandlet and use it if possible. Otherwise we'll have to use the relocation spec.
+    $netCheck = $Network | ?{$null -ne $_.NetworkType}
+    if ($Datastore.Count -le 1 -and $netCheck.Count -in @(0,$Network.Count)) {
+        Write-Log -severityLevel Debug -logMessage "Using 'Move-VM' commandlet to perform migration."
+        if ($null -ne $Datastore) {
+            $moveParameters.Datastore = $Datastore[0]
+        }
+        if ($null -ne $Network) {
+            if ($null -ne $Network.NetworkType) {
+                $moveParameters.Network = $Network
+            } else {
+                $moveParameters.PortGroup = $Network
+            }
+        }
+        $vm = Move-VM @moveParameters
+        return $vm
+    }
+
+    #We must use relocate spec due to multiple target datastores OR multiple target Network types
+    if ($null -ne $Datastore) {
+        $moveParameters.Datastore = $Datastore
+    }
+    if ($null -ne $Network) {
+        $moveParameters.Network = $Network
+    }
+    Write-Log -severityLevel Debug -logMessage "Using 'RelocateVM' to perform migration."
+    $spec = New-Object VMware.Vim.VirtualMachineRelocateSpec
+    foreach ($key in $moveParameters.Keys) {
+        $value = $moveParameters[$key]
+        Write-Log -severityLevel Debug -logMessage "Processing key '$key' for the relocation spec with the value(s) '$value'"
+        if ($key -eq "Datastore") {
+            $vmDisks = $vm | Get-HardDisk | Sort-Object -Property Name #Sort 'Hard Disk 1', '...2', '...3', etc
+            $storagePodDSTable = @{}
+            #Keep VMX details at same location as Hard Disk 1
+            $spec.Datastore = New-Object VMware.Vim.ManagedObjectReference
+            if ($value[0].ExtensionData.MoRef.Type -eq "StoragePod") {
+                #This is a DatastoreCluster so we must choose a DS. Picking the one with the most space.
+                $ds = $value[0] | Get-Datastore | Sort-Object -Property FreeSpaceGB -Descending | Select-Object -First 1
+                $spec.Datastore = $ds.ExtensionData.MoRef
+                $storagePodDSTable.Add($value[0].Name,$ds)
+            } else {
+                $spec.Datastore = $value[0].ExtensionData.MoRef
+            }
+
+            #check how many target Datastores were passed. If 1, put everything on it.
+            if ($value.Count -eq 1) {
+                $dsIndex = 0
+                $singleDS = $true
+            } else {
+                $singleDS = $false
+            }
+
+            $spec.Disk = New-Object VMware.Vim.VirtualMachineRelocateSpecDiskLocator[]($vmDisks.Count)
+            for ($i = 0; $i -lt $vmDisks.Count; $i++) {
+                if (!$singleDS) {
+                    $dsIndex = $i
+                }
+                $spec.Disk[$i] = New-Object VMware.Vim.VirtualMachineRelocateSpecDiskLocator
+                $spec.Disk[$i].DiskId = $vmDisks[$i].ExtensionData.Key
+                $spec.Disk[$i].Datastore = New-Object VMware.Vim.ManagedObjectReference
+                if ($value[$dsIndex].ExtensionData.MoRef.Type -eq "StoragePod") {
+                    if ($null -ne $storagePodDSTable[$value[$dsIndex].Name]) {
+                        $spec.Disk[$i].Datastore = $storagePodDSTable[$value[$dsIndex].Name].ExtensionData.MoRef
+                    } else {
+                        #This is a DatastoreCluster so we must choose a DS. Picking the one with the most space.
+                        $ds = $value[$dsIndex] | Get-Datastore | Sort-Object -Property FreeSpaceGB -Descending | Select-Object -First 1
+                        $spec.Disk[$i].Datastore = $ds.ExtensionData.MoRef
+                        $storagePodDSTable.Add($value[$dsIndex].Name,$ds)
+                    }
+                } else {
+                    $spec.Disk[$i].Datastore = $value[$dsIndex].ExtensionData.MoRef
+                }
+            }
+        }
+
+        if ($key -eq "Network") {
+            $vmNetAdapters = $moveParameters["NetworkAdapter"]
+            if ($null -eq $vmNetAdapters) {
+                $vmNetAdapters = Get-NetworkAdapter -VM $vm | Sort-Object -Property Name
+            }
+
+            #check how many target Networks were passed. If 1, put everything on it.
+            if ($value.Count -eq 1) {
+                $netIndex = 0
+                $singleNet = $true
+            } else {
+                $singleNet = $false
+            }
+
+            $spec.DeviceChange = New-Object VMware.Vim.VirtualDeviceConfigSpec[] ($vmNetAdapters.Count)
+            for ($i = 0; $i -lt $vmNetAdapters.Count; $i++) {
+                if (!$singleNet) {
+                    $netIndex = $i
+                }
+                $spec.DeviceChange[$i] = New-Object VMware.Vim.VirtualDeviceConfigSpec
+                #$spec.DeviceChange[$i].Device = $vmNetAdapters[$i].ExtensionData
+                $spec.DeviceChange[$i].Device = New-Object $vmNetAdapters[$i].ExtensionData.GetType().FullName
+                $spec.DeviceChange[$i].Device.Key = $vmNetAdapters[$i].ExtensionData.Key
+                if ($value[$netIndex].ExtensionData.MoRef.Type -eq "OpaqueNetwork") {
+                    $spec.DeviceChange[$i].Device.Backing = New-Object VMware.Vim.VirtualEthernetCardOpaqueNetworkBackingInfo
+                    $spec.DeviceChange[$i].Device.Backing.OpaqueNetworkId = $value[$netIndex].OpaqueNetworkId
+                    $spec.DeviceChange[$i].Device.Backing.OpaqueNetworkType = $value[$netIndex].OpaqueNetworkType
+                } elseif ($value[$netIndex].ExtensionData.MoRef.Type -eq "Network") {
+                    $spec.DeviceChange[$i].Device.Backing = New-Object VMware.Vim.VirtualEthernetCardNetworkBackingInfo
+                    $spec.DeviceChange[$i].Device.Backing.DeviceName = $value[$netIndex].Name
+                } elseif ($value[$netIndex].ExtensionData.MoRef.Type -eq "DistributedVirtualPortgroup") {
+                    $spec.DeviceChange[$i].Device.Backing = New-Object VMware.Vim.VirtualEthernetCardDistributedVirtualPortBackingInfo
+                    $spec.DeviceChange[$i].Device.Backing.Port = New-Object VMware.Vim.DistributedVirtualSwitchPortConnection
+                    $spec.DeviceChange[$i].Device.Backing.Port.SwitchUuid = $value[$netIndex].VirtualSwitch.Key
+                    $spec.DeviceChange[$i].Device.Backing.Port.PortgroupKey = $value[$netIndex].Key
+                } else {
+                    throw "Encountered unknown network type '$($value[$netIndex].ExtensionData.MoRef.Type)' while building relocation spec. Associated network: $($value[$netIndex].Name)."
+                }
+                $spec.DeviceChange[$i].Operation = 'edit'
+            }
+        }
+
+        if ($key -eq "InventoryLocation") {
+            $spec.Folder = New-Object VMware.Vim.ManagedObjectReference
+            $spec.Folder = $value.ExtensionData.MoRef
+        }
+
+        if ($key -eq "Destination") {
+            $spec.Host = New-Object VMware.Vim.ManagedObjectReference
+            $spec.Host = $value.ExtensionData.MoRef
+            $spec.Pool = New-Object VMware.Vim.ManagedObjectReference
+            if ($Destination.ExtensionData.MoRef.Type -eq "ResourcePool") {
+                $spec.Pool = $Destination.ExtensionData.MoRef
+            } else {
+                #Since $value is a Host here, we look for it's default res pool first. 
+                $pool = $value | Get-ResourcePool -Name "Resources" -Server $Server -ErrorAction SilentlyContinue
+                if ($null -eq $pool) {
+                    #if default res pool wasnt found, then it's likely in a cluster, search the parent.
+                    $pool = $value.Parent | Get-ResourcePool -Name "Resources" -Server $Server
+                }
+                $spec.Pool = $pool.ExtensionData.MoRef
+            }
+        }
+    }
+    
+    if ($vm.ExtensionData.Client.ServiceUrl -ne $Server.ServiceUri.AbsoluteUri) {
+        #The relocation spec requires credentials for cross vc.
+        # Make sure the viconn was created with VAMT Initialize-VIServer
+        if ($null -ne $Server.Credential) {
+            $spec.Service = New-Object VMware.Vim.ServiceLocator
+            $spec.Service.Credential = New-Object VMware.Vim.ServiceLocatorNamePassword
+            $spec.Service.Credential.Username = $Server.Credential.UserName
+            $spec.Service.Credential.Password = $Server.Credential.GetNetworkCredential().Password
+        } else {
+            throw "Credential property inside the specified VI Connection was null. This function should only be used with VI Connections created by VAMT\Initialize-VIServer."
+        }
+    }
+    #$cert = Get-VIMachineCertificate -Server $Server -VCenterOnly | ?{ $_.Subject -eq $Server.ServiceUri.Host }
+    #$spec.Service.SslThumbprint = ($cert.Certificate.Thumbprint -split '(..)' -ne '') -join ":"
+    $spec.Service.SslThumbprint = Get-SSLThumbprint -URL $Server.ServiceUri.AbsoluteUri
+    $spec.Service.InstanceUuid = $Server.InstanceUuid
+    $spec.Service.Url = $Server.ServiceUri.AbsoluteUri
+    $printSpec = $spec | ConvertTo-Json -Depth 10 | ConvertFrom-Json
+    if (!!$spec.Service.Credential.Password) {
+        $printSpec.Service.Credential.Password = "***********"
+    }
+    Write-Log -severityLevel Debug -logMessage "Built the following relocation spec: $($printSpec | ConvertTo-Json -Depth 10)"
+    Write-Log -severityLevel Info -logMessage "Starting Move Now."
+    $vm.ExtensionData.RelocateVM($spec,'highPriority')
+    return (Get-VM -Name $vm.Name -Server $Server)
 }
 
 function Get-StoredCredential {
@@ -246,7 +490,8 @@ function Send-Syslog {
         $byteSyslogMessage = $asciiEncoding.GetBytes($formattedSyslogMessage)
         $result = $UDP_Client.Send($byteSyslogMessage, $byteSyslogMessage.Length)
         if ($result -eq $byteSyslogMessage.Length) {
-            Write-Log @logParameters -severityLevel Debug -logMessage "Successfully sent Syslog message. Payload size: $($byteSyslogMessage.Length) bytes." -skipConsole
+            #This causes far too many unnecessary logs in the logfile. Absence of logs can be seen as success. Left code incase needed later.
+            #Write-Log @logParameters -severityLevel Debug -logMessage "Successfully sent Syslog message. Payload size: $($byteSyslogMessage.Length) bytes." -skipConsole
         } else {
             Write-Log @logParameters -severityLevel Error -logMessage "Failed to send Syslog message. Payload size: $($byteSyslogMessage.Length) bytes. Sent payload $result bytes."
         }
@@ -578,6 +823,27 @@ function Confirm-ActiveTasks {
     return $activeTasks
 }
 
+function Get-VIObjectByObject {
+    param (
+        [Parameter(Mandatory)]
+        [ValidateNotNullOrEmpty()]
+        $refObject,
+
+        [Parameter(Mandatory)]
+        [ValidateNotNullOrEmpty()]
+        [VMware.VimAutomation.ViCore.Impl.V1.VIServerImpl]$Server
+    )
+
+    if ($refObject -is [array]) {
+        $obj = @()
+        foreach ($id in $refObject.Id) {
+            $obj += Get-VIObjectByVIView -MORef $id -Server $Server
+        }
+    } else {
+        $obj = Get-VIObjectByVIView -MORef $refObject.Id -Server $Server
+    }
+    return $obj
+}
 function Test-VMTools {
     param (
         [Parameter(Mandatory)]
@@ -591,6 +857,45 @@ function Test-VMTools {
     }
     Write-Log -severityLevel Warn -logMessage "VM Tools on '$($vm.Name)' failed validation with status '$toolsStatus'."
     return $false
+}
+
+function Get-SSLThumbprint {
+    param(
+        [Parameter(Mandatory)]
+        [String]$url
+    )
+
+    #Original Author: William Lam (https://gist.github.com/lamw/988e4599c0f88d9fc25c9f2af8b72c92)
+
+    if ($null -eq ([System.Management.Automation.PSTypeName]'IDontCarePolicy').Type) {
+add-type '
+    using System.Net;
+    using System.Security.Cryptography.X509Certificates;
+        public class IDontCarePolicy : ICertificatePolicy {
+        public IDontCarePolicy() {}
+        public bool CheckValidationResult(
+            ServicePoint sPoint, X509Certificate cert,
+            WebRequest wRequest, int certProb) {
+            return true;
+        }
+    }
+'
+    }
+    [System.Net.ServicePointManager]::CertificatePolicy = new-object IDontCarePolicy
+
+    # Need to connect using simple GET operation for this to work
+    try {Invoke-RestMethod -Uri $url -Method Get | Out-Null} catch {}
+
+    try {
+        $endpoint_request = [System.Net.Webrequest]::Create("$url")
+        $ssl_thumbprint = $endpoint_request.ServicePoint.Certificate.GetCertHashString()
+    } catch {
+        if ($null -eq $ssl_thumbprint) {
+            throw "Unable to retrieve Cert/Thumbprint from url '$url'. See error:`n`t$_"
+        }
+    }
+
+    return $ssl_thumbprint -replace '(..(?!$))','$1:'
 }
 
 function Start-PreMigrationExtensibility {
@@ -789,7 +1094,11 @@ function Confirm-MigrationTargets {
     #Additionaly, we will validate the network & storage selections with the context of the selected compute for each row.
     $missingPortGroups = @()
     $missingStorage = @()
-    #$dscViews = Get-View -ViewType StoragePod -Server $viConnections
+    
+    #Validate that provided count of PGs and Datastores, is either 1 or equal to the count of NICs and Disks on each VM
+    $invalidTgtPGs = @()
+    $invalidTgtDSs = @()
+
     $migrationTargets = $inputs | %{
         $vmName = $_."$($inputHeaders.name)"
         $vCenterName = $_."$($inputHeaders.vcenter)"
@@ -809,20 +1118,33 @@ function Confirm-MigrationTargets {
         $computeView.updateviewdata('Network.*','Datastore.*')
         $networkViews = $computeView.LinkedView.Network
 
-        $networkView = $networkViews | ?{$_.Name -in $networkNames}
-
-
-        
-        if (!!$networkView) {
-            if ($networkView.Length -gt 1) {
-                Write-Log -severityLevel Warn -logMessage "$($networkView.Length) networks were found with name ($networkNames) and type(s) ($(($networkView.MoRef.Type | Sort | Get-Unique) -join ', ')) within Compute ($computeName)."
-                $missingPortGroups += $networkNames
+        $networkObjs = @()
+        foreach ($networkName in $networkNames) {
+            $networkView = $networkViews | ?{$_.Name -eq $networkName}
+            if (!!$networkView) {
+                if ($networkView.Length -gt 1) {
+                    Write-Log -severityLevel Warn -logMessage "$($networkView.Length) networks were found with name ($networkName) and type(s) ($(($networkView.MoRef.Type | Sort | Get-Unique) -join ', ')) within Compute ($computeName)."
+                    $missingPortGroups += $networkName
+                } else {
+                    $networkObjs += Get-VIObjectByVIView -VIView $networkView
+                }
             } else {
-                $networkObj = Get-VIObjectByVIView -VIView $networkView
+                Write-Log -severityLevel Warn -logMessage "No networks were found with name ($networkName) within Compute ($computeName)."
+                $missingPortGroups += $networkName
             }
+        }
+
+        if ($networkNames -is [array]) {
+            $vmNICs = $vmObj | Get-NetworkAdapter
+            if ($vmNICs.count -ne $networkObjs.count) {
+                $invalidTgtPGs += $vmObj.Name
+            }
+            # Preserving the type of network input going forward. If the input was an array of net names, then we are doing 
+            # a multi vnic migration. 
+            $network = $networkObjs
         } else {
-            Write-Log -severityLevel Warn -logMessage "No networks were found with name ($networkNames) within Compute ($computeName)."
-            $missingPortGroups += $networkNames
+            #If Not array, then we move all NICs to the single Network specified.
+            $network = $networkObjs[0]
         }
 
         $datastoreViews = $computeView.LinkedView.Datastore
@@ -832,17 +1154,32 @@ function Confirm-MigrationTargets {
                 $_.LinkedView.Parent
             }
         } | Sort -Property Name -Unique
-        $storageView = ($datastoreViews + $dscViews) | ?{$_.Name -eq $storageNames}
-        if (!!$storageView) {
-            if ($storageView.Length -gt 1) {
-                Write-Log -severityLevel Warn -logMessage "$($storageView.Length) Datastores or DSCs were found with name ($storageNames) and type(s) ($(($storageView.MoRef.Type | Sort | Get-Unique) -join ', ')) within Compute ($computeName)."
-                $missingStorage += $storageNames
+
+        $storageObjs = @()
+        foreach ($storageName in $storageNames) {
+            $storageView = ($datastoreViews + $dscViews) | ?{$_.Name -eq $storageName}
+            if (!!$storageView) {
+                if ($storageView.Length -gt 1) {
+                    Write-Log -severityLevel Warn -logMessage "$($storageView.Length) Datastores or DSCs were found with name ($storageName) and type(s) ($(($storageView.MoRef.Type | Sort | Get-Unique) -join ', ')) within Compute ($computeName)."
+                    $missingStorage += $storageName
+                } else {
+                    $storageObjs += Get-VIObjectByVIView -VIView $storageView
+                }
             } else {
-                $storageObj = Get-VIObjectByVIView -VIView $storageView
+                Write-Log -severityLevel Warn -logMessage "No Datastores or DSCs were found with name ($storageName) within Compute ($computeName)."
+                $missingStorage += $storageName
             }
+        }
+
+        if ($storageNames -is [array]) {
+            $vmDisks = $vmObj | Get-HardDisk
+            if ($vmDisks.count -ne $storageObjs.count) {
+                $invalidTgtDSs += $vmObj.Name
+            }
+            # Same situation as network above.
+            $storage = $storageObjs
         } else {
-            Write-Log -severityLevel Warn -logMessage "No Datastores or DSCs were found with name ($storageNames) within Compute ($computeName)."
-            $missingStorage += $storageNames
+            $storage = $storageObjs[0]
         }
 
         $validationErrors = @()
@@ -886,13 +1223,13 @@ function Confirm-MigrationTargets {
                 $jobState = $jobStates.jobNotRun
             }
         }
-
+        
         [PSCustomObject]@{
             src_vcenter = $srcViConn
             tgt_vm = $vmObj
             tgt_compute = $computeObj
-            tgt_network = $networkObj
-            tgt_storage = $storageObj
+            tgt_network = $network
+            tgt_storage = $storage
             tgt_vcenter = $tgtViConn
             tag_state = $vmState
             job_state = $jobState
@@ -902,9 +1239,15 @@ function Confirm-MigrationTargets {
     }
 
     if (($missingPortGroups.Length + $missingStorage.Length) -gt 0) {
-        $missingMessage = "The following inputs are missing from the provided vCenters OR are not accessible from the specified compute targets.`n`Invalid Portgroups: $($missingPortGroups -join ', '); Invalid Datastores/DSCs: $($missingStorage -join ', ')"
+        $missingMessage = "The following inputs are missing from the provided vCenters OR are not accessible from the specified compute targets.`n`tInvalid Portgroups: $($missingPortGroups -join ', ')`n`tInvalid Datastores/DSCs: $($missingStorage -join ', ')"
         Write-Log -severityLevel Error -logMessage $missingMessage
         throw $missingMessage
+    }
+
+    if (($invalidTgtPGs.Length + $invalidTgtDSs.Length) -gt 0) {
+        $invalidMessage = "The following machines in the inputs file have target network or storage destinations that do not match the number of Net Adapters or Disks attached to the VM in vCenter.`n`tInvalid Net Targets: $($invalidTgtPGs -join ', ')`n`tInvalid Storage Targets: $($invalidTgtDSs -join ', ')"
+        Write-Log -severityLevel Error -logMessage $invalidMessage
+        throw $invalidMessage
     }
 
     return $migrationTargets
@@ -960,17 +1303,50 @@ function Confirm-RollbackTargets {
     $rollbackTargets = $inputs | %{
         $vmName = $_."$($inputHeaders.name)"
         $vmObj = $vms | ?{$_.Name -eq $vmName}
+        $attrValidated = $true
         $emptyAttrError = "VM attribute '{0}' is not set on VM '$vmName'."
         try {
             $rollbackVcName = Confirm-NotNullOrEmpty -inString $vmObj.CustomFields.Item($vCenterAttrs.sourceVcAttribute) -failMessage ($emptyAttrError -f $vCenterAttrs.sourceVcAttribute)
+        } catch {
+            $attrValidated = $false
+        } try {
             $rollbackHostId = Confirm-NotNullOrEmpty -inString $vmObj.CustomFields.Item($vCenterAttrs.sourceHostAttribute) -failMessage ($emptyAttrError -f $vCenterAttrs.sourceHostAttribute)
+        } catch {
+            $attrValidated = $false
+        } try {
             $rollbackResPoolId = Confirm-NotNullOrEmpty -inString $vmObj.CustomFields.Item($vCenterAttrs.sourceRpAttribute) -failMessage ($emptyAttrError -f $vCenterAttrs.sourceRpAttribute)
+        } catch {
+            $attrValidated = $false
+        } try {
             $rollbackVmFolderId = Confirm-NotNullOrEmpty -inString $vmObj.CustomFields.Item($vCenterAttrs.sourceFolderAttribute) -failMessage ($emptyAttrError -f $vCenterAttrs.sourceFolderAttribute)
+        } catch {
+            $attrValidated = $false
+        } try {
             $rollbackDatastoreId = Confirm-NotNullOrEmpty -inString $vmObj.CustomFields.Item($vCenterAttrs.sourceDsAttribute) -failMessage ($emptyAttrError -f $vCenterAttrs.sourceDsAttribute)
+        } catch {
+            $attrValidated = $false
+        } try {
             $rollbackPortGroupId = Confirm-NotNullOrEmpty -inString $vmObj.CustomFields.Item($vCenterAttrs.sourcePgAttribute) -failMessage ($emptyAttrError -f $vCenterAttrs.sourcePgAttribute)
+        } catch {
+            $attrValidated = $false
+        } try {
             $rollbackSnapshotName = Confirm-NotNullOrEmpty -inString $vmObj.CustomFields.Item($vCenterAttrs.snapshotNameAttribute) -failMessage ($emptyAttrError -f $vCenterAttrs.snapshotNameAttribute)
         } catch {
+            $attrValidated = $false
+        }
+        if (!$attrValidated) {
             $missingRollbackAttrs += $vmName
+        }
+
+        try {
+            $rollbackPortGroupIds = $rollbackPortGroupId | ConvertFrom-Json -ErrorAction Stop
+        } catch {
+            $rollbackPortGroupIds = $rollbackPortGroupId
+        }
+        try {
+            $rollbackDatastoreIds = $rollbackDatastoreId | ConvertFrom-Json -ErrorAction Stop
+        } catch {
+            $rollbackDatastoreIds = $rollbackDatastoreId
         }
 
         [PSCustomObject]@{
@@ -979,32 +1355,25 @@ function Confirm-RollbackTargets {
             tgt_host = $rollbackHostId
             tgt_respool = $rollbackResPoolId
             tgt_folder = $rollbackVmFolderId
-            tgt_network = $rollbackPortGroupId
-            tgt_datastore = $rollbackDatastoreId
+            tgt_network = $rollbackPortGroupIds
+            tgt_datastore = $rollbackDatastoreIds
             tgt_snapshot = $rollbackSnapshotName
+            tgt_attrs_valid = $attrValidated
         }
     }
 
     if (($missingRollbackAttrs.Length) -gt 0) {
         $missingMessage = "The following VMs are missing one or more of the required Custom Attributes for performing a rollback.`n`tVMs: $($missingRollbackAttrs -join ', ')"
-        Write-Log -severityLevel Error -logMessage $missingMessage
-        throw $missingMessage
+        Write-Log -severityLevel Warn -logMessage $missingMessage
     }
 
     #Now we will re-build the table using the actual objects we have IDs for. 
     $missingvCenters = @()
-    $missingPortGroups = @()
-    $missingDatastores = @()
-    $missingHosts = @()
-    $missingResPools = @()
-    $missingFolders = @()
-    $missingSnapshots = @()
     $rollbackTargets = $rollbackTargets | %{
         $target = $_
         $vm = $target.tgt_vm
         $srcViConn = $viConnections | ?{$_.Id -eq ($vm.Uid -Split 'VirtualMachine' | Select -First 1)}
         $tgtViConn = $viConnections | ?{$_.Name -eq $target.tgt_vc}
-
         $validationErrors = @()
         $vmState = Get-VMStateBasedOnTag -vm $vm -viConn $srcViConn -stateTagsCatName $tagDetails.tagCatName
         $jobState = $vmState
@@ -1026,14 +1395,14 @@ function Confirm-RollbackTargets {
         } elseif ($jobState -eq $tagDetails.rollbackTagName) {
             $jobState = $jobStates.rolledBackExternal
             $validationErrors += ($notAttempted -f $jobState)
-        } elseif ($jobState -eq "notag") {
+        } elseif ($jobState -eq "notag" -or !$target.tgt_attrs_valid) {
             $jobState = $jobStates.jobNotRun
             $validationErrors += ($notAttempted -f $jobState)
         } else {
             $eligibleToRun = $true
         }
 
-        if (!$tgtViConn) {
+        if (!$tgtViConn -and $eligibleToRun) {
             Write-Log -severityLevel Error -logMessage "No current connection for rollback vCenter '$($_.tgt_vc)' was found (vCenter for VM: '$($vm.Name)'). You must specify all required vCenters when executing the script."
             $missingvCenters += $_.tgt_vc
             continue
@@ -1044,6 +1413,7 @@ function Confirm-RollbackTargets {
             $rollbackHostId = $_.tgt_host
             $hostObj = Get-VIObjectByVIView -MORef $rollbackHostId -Server $tgtViConn -ErrorAction Stop
         } catch {
+            $hostObj = "Not Found"
             if ($eligibleToRun) {
                 Write-Log -severityLevel Error -logMessage ($notFoundError -f $rollbackHostId)
                 $validationErrors += ($notFoundError -f $rollbackHostId)
@@ -1053,6 +1423,7 @@ function Confirm-RollbackTargets {
             $rollbackResPoolId = $_.tgt_respool
             $rpObj = Get-VIObjectByVIView -MORef $rollbackResPoolId -Server $tgtViConn -ErrorAction Stop
         } catch {
+            $rpObj = "Not Found"
             if ($eligibleToRun) {
                 Write-Log -severityLevel Error -logMessage ($notFoundError -f $rollbackResPoolId)
                 $validationErrors += ($notFoundError -f $rollbackResPoolId)
@@ -1062,24 +1433,33 @@ function Confirm-RollbackTargets {
             $rollbackVmFolderId = $_.tgt_folder
             $folderObj = Get-VIObjectByVIView -MORef $rollbackVmFolderId -Server $tgtViConn -ErrorAction Stop
         } catch {
+            $folderObj = "Not Found"
             if ($eligibleToRun) {
                 Write-Log -severityLevel Error -logMessage ($notFoundError -f $rollbackVmFolderId)
                 $validationErrors += ($notFoundError -f $rollbackVmFolderId)
             }
         }
         try {
-            $rollbackPortGroupId = $_.tgt_network
-            $pgObj = Get-VIObjectByVIView -MORef $rollbackPortGroupId -Server $tgtViConn -ErrorAction Stop
+            $rollbackPortGroupIds = $_.tgt_network
+            $pgObjs = $rollbackPortGroupIds | %{
+                $rollbackPortGroupId = $_
+                Get-VIObjectByVIView -MORef $rollbackPortGroupId -Server $tgtViConn -ErrorAction Stop
+            }
         } catch {
+            $pgObjs = "Not Found"
             if ($eligibleToRun) {
                 Write-Log -severityLevel Error -logMessage ($notFoundError -f $rollbackPortGroupId)
                 $validationErrors += ($notFoundError -f $rollbackPortGroupId)
             }
         }
         try {
-            $rollbackDatastoreId = $_.tgt_datastore
-            $dsObj = Get-VIObjectByVIView -MORef $rollbackDatastoreId -Server $tgtViConn -ErrorAction Stop
+            $rollbackDatastoreIds = $_.tgt_datastore
+            $dsObjs = $rollbackDatastoreIds | %{
+                $rollbackDatastoreId = $_
+                Get-VIObjectByVIView -MORef $rollbackDatastoreId -Server $tgtViConn -ErrorAction Stop
+            }
         } catch {
+            $dsObjs = "Not Found"
             if ($eligibleToRun) {
                 Write-Log -severityLevel Error -logMessage ($notFoundError -f $rollbackDatastoreId)
                 $validationErrors += ($notFoundError -f $rollbackDatastoreId)
@@ -1089,6 +1469,7 @@ function Confirm-RollbackTargets {
             $rollbackSnapshotName = $_.tgt_snapshot
             $snapObj = Get-Snapshot -VM $vm -Name $rollbackSnapshotName -Server $srcViConn -ErrorAction Stop
         } catch {
+            $snapObj = "Not Found"
             if ($eligibleToRun) {
                 Write-Log -severityLevel Error -logMessage ($notFoundError -f $rollbackSnapshotName)
                 $validationErrors += ($notFoundError -f $rollbackSnapshotName)
@@ -1108,6 +1489,10 @@ function Confirm-RollbackTargets {
             }
         }
 
+        if ($null -eq $tgtViConn) {
+            $tgtViConn = "Not Found"
+        }
+
         [PSCustomObject]@{
             src_vcenter = $srcViConn
             tgt_vm = $vm
@@ -1115,8 +1500,8 @@ function Confirm-RollbackTargets {
             tgt_host = $hostObj
             tgt_respool = $rpObj
             tgt_folder = $folderObj
-            tgt_network = $pgObj
-            tgt_datastore = $dsObj
+            tgt_network = $pgObjs
+            tgt_datastore = $dsObjs
             tgt_snapshot = $snapObj
             tag_state = $vmState
             job_state = $jobState
@@ -1126,7 +1511,6 @@ function Confirm-RollbackTargets {
     }
 
     $missingMessage = "The following rollback target vCenters are missing from the provided inputs:`n"
-    $missingCount = 0
     if ($missingvCenters.Length -gt 0) {
         $missingMessage += $($missingvCenters -join ', ')
         Write-Log -severityLevel Error -logMessage $missingMessage
@@ -1266,14 +1650,6 @@ function Start-MigrateVMJob {
 
         [Parameter(Mandatory)]
         [ValidateNotNullOrEmpty()]
-        [PSCredential]$srcCred,
-
-        [Parameter(Mandatory)]
-        [ValidateNotNullOrEmpty()]
-        [PSCredential]$tgtCred,
-
-        [Parameter(Mandatory)]
-        [ValidateNotNullOrEmpty()]
         $scriptVars,
 
         [Parameter()]
@@ -1283,27 +1659,31 @@ function Start-MigrateVMJob {
         [Switch]$WhatIf
     )
 
-    $jobFunctions = "function Start-PreMigrationExtensibility { ${function:Start-PreMigrationExtensibility} }`n"
-    $jobFunctions += "function Start-PostMigrationExtensibility { ${function:Start-PostMigrationExtensibility} }`n"
-    $jobFunctions += "function Write-Log { ${function:Write-Log} }`n"
-    $jobFunctions += "function Confirm-ActiveTasks { ${function:Confirm-ActiveTasks} }`n"
-    $jobFunctions += "function Send-Syslog { ${function:Send-Syslog} }`n"
-    $jobFunctions += "function Get-VMStateBasedOnTag { ${function:Get-VMStateBasedOnTag} }`n"
-    $jobFunctions += "function Set-VMStateTag { ${function:Set-VMStateTag} }"
+    if ($null -eq $srcViConn.Credential -or $null -eq $tgtViConn.Credential) {
+        throw "This function only supports VI Connections created with VAMT\Initialize-VIServer"
+    }
 
     $test = !!$WhatIf
     $retry = !!$isRetry
     $migrationJob = Start-Job -ScriptBlock {
         try {
+            #Wait-Debugger
             $using:scriptVars | %{ New-Variable -Name $_.Name -Value $_.Value}
-            #Had to move awawy from using the session secret due to PowerCLI/vC Lookup Service issue when running inside of a PS Job
+            #Import VAMT functions module
+            if(!(Test-Path "$vamtWorkingDirectory/VAMT.psm1")){
+                throw "VAMT functions module ($vamtWorkingDirectory/VAMT.psm1) was not found. Quiting now. - $(Get-Date)"
+            }
+            Import-Module -Name "$vamtWorkingDirectory/VAMT.psm1"
+            #Had to move away from using the session secret due to PowerCLI/vC Lookup Service issue when running inside of a PS Job
             #$viConn = Connect-ViServer -Server $using:viConn -Session $using:viConn.SessionSecret
-            $srcViConn = Connect-ViServer -Server $using:srcViConn.Name -Credential $using:srcCred
-            $tgtViConn = Connect-ViServer -Server $using:tgtViConn.Name -Credential $using:tgtCred
+            $srcViConn = Initialize-VIServer -vCenters $using:srcViConn.Name -Credential $using:srcViConn.Credential
+            $tgtViConn = Initialize-VIServer -vCenters $using:tgtViConn.Name -Credential $using:tgtViConn.Credential
+
             $vm = Get-VIObjectByVIView -MORef $using:vm.Id -Server $srcViConn
             $compute = Get-VIObjectByVIView -MORef $using:compute.Id -Server $tgtViConn
-            $network = Get-VIObjectByVIView -MORef $using:network.Id -Server $tgtViConn
-            $storage = Get-VIObjectByVIView -MORef $using:storage.Id -Server $tgtViConn
+            #continue to preserve the network type (array vs not) as we're relying on this to determine if we're doing multi nic/datastore migration
+            $network = Get-VIObjectByObject -refObject $using:network -Server $tgtViConn
+            $storage = Get-VIObjectByObject -refObject $using:storage -Server $tgtViConn
             $WhatIf = $using:test
             $isRetry = $using:retry
             $vmName = $vm.Name
@@ -1311,6 +1691,7 @@ function Start-MigrateVMJob {
             $PSDefaultParameterValues = @{
                 'Write-Log:logDir' = $vamtLoggingDirectory
                 'Write-Log:logFileNamePrefix' = $envLogPrefix
+                'Write-Log:debugLogging' = $vamtDebugLogging
             }
             if (![string]::IsNullOrEmpty($vamtSyslogServer)) {
                 $PSDefaultParameterValues.Add('Write-Log:syslogServer', $vamtSyslogServer)
@@ -1322,7 +1703,7 @@ function Start-MigrateVMJob {
             if ($isRetry) {
                 $retryMessage = "retry of "
             }
-            Write-Log -severityLevel Info -logMessage ("Starting {0}migration process on '$($vm.Name)'." -f $retryMessage)
+            Write-Log -logDefaults $PSDefaultParameterValues -severityLevel Info -logMessage ("Starting {0}migration process on '$($vm.Name)'." -f $retryMessage)
             
             #validate no-one is stepping on our job
             $currentState = Get-VMStateBasedOnTag -vm $vm -viConn $srcViConn -stateTagsCatName $vamtTagDetails.tagCatName
@@ -1344,44 +1725,77 @@ function Start-MigrateVMJob {
             $currentHostId = $vm.VMHostId
             $currentRpId = $vm.ResourcePoolId
             $currentFolderId = $vm.FolderId
-            #Current support is for only 1 source and target Datastore - rollback will result in all disks rolled back to original OS disk Datastore
-            $currentDsId = (Get-HardDisk -VM $vm | sort -Property Name | Select -First 1).ExtensionData.Backing.Datastore.ToString()
-            #Current support is for only 1 source and target PortGroup - rollback will result first network being rolled back to original Portgroup. All others disconnected.
-            #$currentPgId = ($vm | Get-View | Select -ExpandProperty Network | Select -First 1).ToString()
-            $firstAdapterNetName = (Get-NetworkAdapter -VM $vm | sort -Property Name | Select -First 1).NetworkName
-            $currentPgId = ($vm.ExtensionData | Select -ExpandProperty Network | ?{ (Get-View -Id $_.ToString()).Name -eq $firstAdapterNetName }).ToString()
-
+            $currentDsIds = (Get-HardDisk -VM $vm | sort -Property Name).ExtensionData.Backing.Datastore | %{ $_.ToString() }
+            $netAdapters = Get-NetworkAdapter -VM $vm | sort -Property Name
+            $currentPgIds = $netAdapters | % {
+                $netName = $_.NetworkName
+                ($vm.ExtensionData | Select -ExpandProperty Network | ?{ (Get-View -Id $_.ToString()).Name -eq $netName }).ToString()
+            }
             #Setup Move targets and validate move is needed.
             $moveParameters = @{
                 VM = $vm
-                Confirm = $false
                 Server = $tgtViConn
                 WhatIf = !!$WhatIf
                 ErrorAction = "Stop"
+                logDefaults = $PSDefaultParameterValues
             }
-            $currentStorage = Get-View -id $currentDsId -Server $srcViConn
-            if ($tgtViConn.InstanceUuid -ne $srcViConn.InstanceUuid -or $storage.Id -notin @($currentDsId, $currentStorage.Parent.ToString())) {
+            #if cross vCenter vMotion, add storage details OR
+            #if current disk config doesnt match passed disk config
+            $currentStorage = Get-View -id $currentDsIds -Server $srcViConn
+            #get a list of morefs for current storage where the Pod ID is used if applicable.
+            $currentPodIDs = $currentStorage | %{ 
+                if ($_.Parent.Type -eq "StoragePod") {
+                    $_.Parent.ToString()
+                } else {
+                    $_.MoRef.ToString()
+                }
+            }
+            $moveStorage = $false
+            if ($tgtViConn.InstanceUuid -ne $srcViConn.InstanceUuid) { #cross vc
+                $moveStorage = $true
+            } elseif ($storage.Count -eq 1) { #one or more disk(s) move to single storage backing
+                if ($storage.ExtensionData.MoRef.Type -eq "StoragePod") {
+                    if (($currentPodIDs | Select -Unique) -ne $storage.ExtensionData.MoRef.ToString()) {
+                        $moveStorage = $true
+                    }
+                } elseif ($storage.ExtensionData.MoRef.Type -eq "Datastore") {
+                    if (($currentDsIds | Select -Unique) -ne $storage.ExtensionData.MoRef.ToString()) {
+                        $moveStorage = $true
+                    }
+                }
+            } else { #one or more disk(s) move to multi storage backing
+                for ($i = 0; $i -lt $currentStorage.Count; $i++) {
+                    if ($storage[$i].ExtensionData.MoRef.Type -eq "StoragePod") {
+                        if ($currentPodIDs[$i] -ne $storage[$i].ExtensionData.MoRef.ToString()) {
+                            $moveStorage = $true
+                            break
+                        }
+                    } elseif ($storage[$i].ExtensionData.MoRef.Type -eq "Datastore") {
+                        if ($currentDsIds[$i] -ne $storage[$i].ExtensionData.MoRef.ToString()) {
+                            $moveStorage = $true
+                            break
+                        }
+                    }
+                }
+            }
+            if ($moveStorage) {
                 $moveParameters.Datastore = $storage
             }
-            if ($tgtViConn.InstanceUuid -ne $srcViConn.InstanceUuid -or $currentPgId -ne $network.Id) {
-                if ($null -ne $network.NetworkType) {
-                    $moveParameters.Network = $network
-                } else {
-                    $moveParameters.PortGroup = $network
-                }
+
+            #if cross vCenter vMotion, add network details OR
+            #if current nic config doesnt match passed nic config
+            if ($tgtViConn.InstanceUuid -ne $srcViConn.InstanceUuid -or 
+            (($currentPgIds -join '') -ne ($network.Id -join '') -and 
+            ($currentPgIds  | select -Unique) -ne $network.Id)) {
+                $moveParameters.NetworkAdapter = $netAdapters
+                $moveParameters.Network = $network
             }
+
             $currentResPool = Get-VIObjectByVIView -MORef $currentRpId -Server $srcViConn
             if ($tgtViConn.InstanceUuid -ne $srcViConn.InstanceUuid -or $compute.Id -notin @($currentHostId, $currentRpId, $currentResPool.ExtensionData.Owner.ToString())) {
-                if ($compute.ExtensionData.MoRef.Type -eq "ClusterComputeResource") {
-                    $tgtCompute = Get-VMHost -Location $compute | ?{$_.ConnectionState -eq "Connected"} | Get-Random
-                } elseif ($compute.ExtensionData.MoRef.Type -eq "ResourcePool") {
-                    $tgtCluster = Get-Cluster -Id $compute.ExtensionData.Owner.ToString() -Server $tgtViConn
-                    $tgtCompute = Get-VMHost -Location $tgtCluster | ?{$_.ConnectionState -eq "Connected"} | Get-Random
-                } else {
-                    $tgtCompute = $compute
-                }
-                $moveParameters.Destination = $tgtCompute
+                $moveParameters.Destination = $compute
             }
+
             #catch incase nothing is apparently moving, maybe move has already occured or a mistake was made.
             if (!$moveParameters.Destination -and !$moveParameters.Datastore) {
                 $message = "Current VM location details match the migration target. Nothing to do."
@@ -1409,8 +1823,8 @@ function Start-MigrateVMJob {
                 $null = $vm | Set-Annotation -CustomAttribute $sourceHostAttribute -Value $currentHostId
                 $null = $vm | Set-Annotation -CustomAttribute $sourceRpAttribute -Value $currentRpId
                 $null = $vm | Set-Annotation -CustomAttribute $sourceFolderAttribute -Value $currentFolderId
-                $null = $vm | Set-Annotation -CustomAttribute $sourceDsAttribute -Value $currentDsId
-                $null = $vm | Set-Annotation -CustomAttribute $sourcePgAttribute -Value $currentPgId
+                $null = $vm | Set-Annotation -CustomAttribute $sourceDsAttribute -Value ($currentDsIds | ConvertTo-Json)
+                $null = $vm | Set-Annotation -CustomAttribute $sourcePgAttribute -Value ($currentPgIds | ConvertTo-Json)
                 $null = $vm | Set-Annotation -CustomAttribute $timestampAttribute -Value $vamtScriptLaunchTime.ToString()
             }
 
@@ -1462,9 +1876,9 @@ function Start-MigrateVMJob {
             
             #Move VM
             Write-Log -severityLevel Info -logMessage "Starting VM Migration for '$($vm.Name)'."
-            Write-Log -severityLevel Debug -logMessage "VM migration spec:`n$($moveParameters | Out-String)"
+            Write-Log -severityLevel Debug -logMessage "VM migration parameters:`n$($moveParameters | Out-String)"
             $null = Confirm-ActiveTasks -vm $vm -viConnection $srcViConn -waitTasks -WhatIf:$WhatIf
-            $vm = Move-VM @moveParameters
+            $vm = Invoke-Move @moveParameters
             if ($compute.ExtensionData.MoRef.Type -eq "ResourcePool" -and $vm.ResourcePoolId -ne $compute.Id) {
                 $moveParameters = @{
                     VM = $vm
@@ -1508,8 +1922,8 @@ function Start-MigrateVMJob {
                     $null = $vm | Set-Annotation -CustomAttribute $sourceHostAttribute -Value $currentHostId
                     $null = $vm | Set-Annotation -CustomAttribute $sourceRpAttribute -Value $currentRpId
                     $null = $vm | Set-Annotation -CustomAttribute $sourceFolderAttribute -Value $currentFolderId
-                    $null = $vm | Set-Annotation -CustomAttribute $sourceDsAttribute -Value $currentDsId
-                    $null = $vm | Set-Annotation -CustomAttribute $sourcePgAttribute -Value $currentPgId
+                    $null = $vm | Set-Annotation -CustomAttribute $sourceDsAttribute -Value ($currentDsIds | ConvertTo-Json)
+                    $null = $vm | Set-Annotation -CustomAttribute $sourcePgAttribute -Value ($currentPgIds | ConvertTo-Json)
                     $null = $vm | Set-Annotation -CustomAttribute $timestampAttribute -Value $vamtScriptLaunchTime.ToString()
                     $null = $vm | Set-Annotation -CustomAttribute $snapshotNameAttribute -Value $snapshot.Name
                 }
@@ -1539,8 +1953,8 @@ function Start-MigrateVMJob {
             try { Disconnect-VIServer * -Confirm:$false } catch {}
             throw $_
         }
-    } -InitializationScript ([scriptblock]::Create($jobFunctions)) -ArgumentList($srcViConn,$tgtViConn,$vm,$compute,$network,$storage,$cred,$retry,$test,$scriptVars)
-
+    } -ArgumentList($srcViConn,$tgtViConn,$vm,$compute,$network,$storage,$retry,$test,$scriptVars)
+    #Debug-Job -Job $migrationJob
     return $migrationJob 
 }
 
@@ -1584,14 +1998,6 @@ function Start-RollbackVMJob {
 
         [Parameter(Mandatory)]
         [ValidateNotNullOrEmpty()]
-        [PSCredential]$srcCred,
-
-        [Parameter(Mandatory)]
-        [ValidateNotNullOrEmpty()]
-        [PSCredential]$tgtCred,
-
-        [Parameter(Mandatory)]
-        [ValidateNotNullOrEmpty()]
         $scriptVars,
 
         [Parameter()]
@@ -1601,22 +2007,24 @@ function Start-RollbackVMJob {
         [Switch]$WhatIf
     )
 
-    $jobFunctions = "function Write-Log { ${function:Write-Log} }`n"
-    $jobFunctions += "function Start-PostMigrationExtensibility { ${function:Start-PostMigrationExtensibility} }`n"
-    $jobFunctions += "function Confirm-ActiveTasks { ${function:Confirm-ActiveTasks} }`n"
-    $jobFunctions += "function Send-Syslog { ${function:Send-Syslog} }`n"
-    $jobFunctions += "function Get-VMStateBasedOnTag { ${function:Get-VMStateBasedOnTag} }`n"
-    $jobFunctions += "function Set-VMStateTag { ${function:Set-VMStateTag} }"
+    if ($null -eq $srcViConn.Credential -or $null -eq $tgtViConn.Credential) {
+        throw "This function only supports VI Connections created with VAMT\Initialize-VIServer"
+    }
 
     $test = !!$WhatIf
     $retry = !!$isRetry
     $rollbackJob = Start-Job -ScriptBlock {
         try {
             $using:scriptVars | %{ New-Variable -Name $_.Name -Value $_.Value}
-            #Had to move awawy from using the session secret due to PowerCLI/vC Lookup Service issue when running inside of a PS Job
-            #$viConn = Connect-ViServer -Server $using:viConn -Session $using:viConn.SessionSecret
-            $srcViConn = Connect-ViServer -Server $using:srcViConn.Name -Credential $using:srcCred
-            $tgtViConn = Connect-ViServer -Server $using:tgtViConn.Name -Credential $using:tgtCred
+            #Import VAMT functions module
+            if(!(Test-Path "$vamtWorkingDirectory/VAMT.psm1")){
+                throw "VAMT functions module ($vamtWorkingDirectory/VAMT.psm1) was not found. Quiting now. - $(Get-Date)"
+            }
+            Import-Module -Name "$vamtWorkingDirectory/VAMT.psm1"
+            
+            $srcViConn = Initialize-VIServer -vCenters $using:srcViConn.Name -Credential $using:srcViConn.Credential
+            $tgtViConn = Initialize-VIServer -vCenters $using:tgtViConn.Name -Credential $using:tgtViConn.Credential
+
             $vm = Get-VIObjectByVIView -MORef $using:vm.Id -Server $srcViConn
             $vmName = $vm.Name
             $vmhost = Get-VIObjectByVIView -MORef $using:vmhost.Id -Server $tgtViConn
@@ -1631,6 +2039,7 @@ function Start-RollbackVMJob {
             $PSDefaultParameterValues = @{
                 'Write-Log:logDir' = $vamtLoggingDirectory
                 'Write-Log:logFileNamePrefix' = $envLogPrefix
+                'Write-Log:debugLogging' = $vamtDebugLogging
             }
             if (![string]::IsNullOrEmpty($vamtSyslogServer)) {
                 $PSDefaultParameterValues.Add('Write-Log:syslogServer', $vamtSyslogServer)
@@ -1660,39 +2069,57 @@ function Start-RollbackVMJob {
 
             #get current compute, network, storage
             Write-Log -severityLevel Info -logMessage "Gathering current compute, network, storage, folder details for '$vmName'."
-            $currentVC = $srcViConn.Name
             $currentHostId = $vm.VMHostId
-            $currentRpId = $vm.ResourcePoolId
             $currentFolderId = $vm.FolderId
-            #Current support is for only 1 source and target Datastore - rollback will result in all disks rolled back to original OS disk Datastore
-            $currentDsId = $vm.DatastoreIdList[0]
-            #Current support is for only 1 source and target PortGroup - rollback will result first network being rolled back to original Portgroup. All others disconnected.
-            $currentPgId = ($vm | Get-View | Select -ExpandProperty Network | Select -First 1).ToString()
+            $currentDsIds = (Get-HardDisk -VM $vm | sort -Property Name).ExtensionData.Backing.Datastore | %{ $_.ToString() }
+            $netAdapters = Get-NetworkAdapter -VM $vm | sort -Property Name
+            $currentPgIds = $netAdapters | % {
+                $netName = $_.NetworkName
+                ($vm.ExtensionData | Select -ExpandProperty Network | ?{ (Get-View -Id $_.ToString()).Name -eq $netName }).ToString()
+            }
 
             #Setup Move targets and validate move is needed.
             $moveParameters = @{
                 VM = $vm
-                Confirm = $false
                 Server = $tgtViConn
                 WhatIf = $WhatIf
                 ErrorAction = "Stop"
+                logDefaults = $PSDefaultParameterValues
             }
-            if ($currentDsId -ne $datastore.Id -or $srcViConn.Name -notcontains $tgtViConn.Name) {
-                $moveParameters.Datastore = $datastore
-            }
-            if ($currentPgId -ne $network.Id -or $srcViConn.Name -notcontains $tgtViConn.Name) {
-                #Move-VM uses different network parameters for NSX-T networks vs std & vds PortGroups
-                if ($null -ne $network.NetworkType) {
-                    $moveParameters.Network = $network
-                } else {
-                    $moveParameters.PortGroup = $network
+
+            #if cross vCenter vMotion, add storage details OR
+            #if current disk config doesnt match passed disk config
+            $currentStorage = Get-View -id $currentDsIds -Server $srcViConn
+            $moveStorage = $false
+            if ($tgtViConn.InstanceUuid -ne $srcViConn.InstanceUuid) { #cross vc
+                $moveStorage = $true
+            } else { #one or more disk(s) move to multi storage backing
+                for ($i = 0; $i -lt $currentStorage.Count; $i++) {
+                    if ($currentDsIds[$i] -ne $datastore[$i].ExtensionData.MoRef.ToString()) {
+                        $moveStorage = $true
+                        break
+                    }
                 }
             }
-            if ($currentFolderId -ne $vmfolder.Id -or $srcViConn.Name -notcontains $tgtViConn.Name) {
+            if ($moveStorage) {
+                $moveParameters.Datastore = $datastore
+            }
+
+            #if cross vCenter vMotion, add network details OR
+            #if current nic config doesnt match passed nic config
+            if ($tgtViConn.InstanceUuid -ne $srcViConn.InstanceUuid -or 
+            (($currentPgIds -join '') -ne ($network.Id -join '') -and 
+            ($currentPgIds  | select -Unique) -ne $network.Id)) {
+                $moveParameters.NetworkAdapter = $netAdapters
+                $moveParameters.Network = $network
+            }
+
+            if ($tgtViConn.InstanceUuid -ne $srcViConn.InstanceUuid -or $currentFolderId -ne $vmfolder.Id) {
                 $moveParameters.InventoryLocation = $vmfolder
             }
+
             $currentHost = Get-VIObjectByVIView -MORef $currentHostId -Server $srcViConn
-            if (($currentHostId -ne $vmhost.Id -and $currentHost.Parent.Id -ne $vmhost.Parent.Id) -or $srcViConn.Name -notcontains $tgtViConn.Name) {
+            if ($tgtViConn.InstanceUuid -ne $srcViConn.InstanceUuid -or ($currentHostId -ne $vmhost.Id -and $currentHost.Parent.Id -ne $vmhost.Parent.Id)) {
                 $moveParameters.Destination = $vmhost
             }
             #catch incase nothing is apparently moving, just add the compute and vCenter will handle it gracefully.
@@ -1727,9 +2154,9 @@ function Start-RollbackVMJob {
             #Move VM
             if ($moveVM) {
                 Write-Log -severityLevel Info -logMessage "Starting VM Rollback Migration for '$($vm.Name)'."
-                Write-Log -severityLevel Debug -logMessage "VM migration spec:`n$($moveParameters | Out-String)"
+                Write-Log -severityLevel Debug -logMessage "VM migration parameters:`n$($moveParameters | Out-String)"
                 $null = Confirm-ActiveTasks -vm $vm -viConnection $srcViConn -waitTasks -WhatIf:$WhatIf
-                $vm = Move-VM @moveParameters
+                $vm = Invoke-Move @moveParameters
         
                 #check to restore resource pool that VM originally lived in
                 if ($vm.ResourcePoolId -ne $respool.Id) {
@@ -1752,12 +2179,20 @@ function Start-RollbackVMJob {
             $snapshot = Get-Snapshot -Name $snapshotName -Server $tgtViConn -VM $vm
             $null = Set-VM -VM $vm -Snapshot $snapshot -Confirm:$false -WhatIf:$WhatIf -ErrorAction Stop
             Write-Log -severityLevel Info -logMessage "Successfully reverted to pre-migration snapshot on '$($vm.Name)'."
-                    
+
             #start the VM and wait for VM tools
             if ($vamtPowerOnIfRollback) {
+                #Sleep to make sure the VM is ready before starting
+                Start-Sleep -Seconds 10
                 Write-Log -severityLevel Info -logMessage "Powering on '$($vm.Name)'."
                 $null = Confirm-ActiveTasks -vm $vm -viConnection $tgtViConn -waitTasks -WhatIf:$WhatIf
-                $vm = Start-VM -VM $vm -Server $tgtViConn -Confirm:$false -WhatIf:$WhatIf
+                try {
+                    $vm = Start-VM -VM $vm -Server $tgtViConn -Confirm:$false -WhatIf:$WhatIf
+                } catch {
+                    #Sometimes vCenter is not ready for the VM to start so we'll wait a little longer
+                    Start-Sleep -Seconds 15
+                    $vm = Start-VM -VM $vm -Server $tgtViConn -Confirm:$false -WhatIf:$WhatIf
+                }
                 if (!$WhatIf -and !$vamtIgnoreVmTools) {
                     Write-Log -severityLevel Info -logMessage "Waiting for VMware Tools..."
                     #Adding sleep to avoid VMtools not installed issue
@@ -1783,7 +2218,7 @@ function Start-RollbackVMJob {
             try { Disconnect-VIServer * -Confirm:$false } catch {}
             throw $_
         }
-    } -InitializationScript ([scriptblock]::Create($jobFunctions)) -ArgumentList($srcViConn,$tgtViConn,$vm,$vmhost,$respool,$network,$vmfolder,$datastore,$cred,$snapshot,$retry,$test,$scriptVars)
+    } -ArgumentList($srcViConn,$tgtViConn,$vm,$vmhost,$respool,$network,$vmfolder,$datastore,$snapshot,$retry,$test,$scriptVars)
 
     return $rollbackJob 
 }
@@ -1803,27 +2238,23 @@ function Start-CleanupVMJob {
 
         [Parameter(Mandatory)]
         [ValidateNotNullOrEmpty()]
-        [PSCredential]$cred,
-
-        [Parameter(Mandatory)]
-        [ValidateNotNullOrEmpty()]
         $scriptVars,
 
         [Parameter()]
         [Switch]$WhatIf
     )
 
-    $jobFunctions = "function Write-Log { ${function:Write-Log} }`n"
-    $jobFunctions += "function Confirm-ActiveTasks { ${function:Confirm-ActiveTasks} }`n"
-    $jobFunctions += "function Send-Syslog { ${function:Send-Syslog} }"
-
     $test = !!$WhatIf
     $cleanupJob = Start-Job -ScriptBlock {
         try {
             $using:scriptVars | %{ New-Variable -Name $_.Name -Value $_.Value}
-            #Had to move awawy from using the session secret due to PowerCLI/vC Lookup Service issue when running inside of a PS Job
-            #$viConn = Connect-ViServer -Server $using:viConn -Session $using:viConn.SessionSecret
-            $viConn = Connect-ViServer -Server $using:viConn.Name -Credential $using:cred
+            #Import VAMT functions module
+            if(!(Test-Path "$vamtWorkingDirectory/VAMT.psm1")){
+                throw "VAMT functions module ($vamtWorkingDirectory/VAMT.psm1) was not found. Quiting now. - $(Get-Date)"
+            }
+            Import-Module -Name "$vamtWorkingDirectory/VAMT.psm1"
+            $viConn = Initialize-VIServer -vCenters $using:viConn.Name -Credential $using:viConn.Credential
+
             $vm = Get-VIObjectByVIView -MORef $using:vm.Id -Server $viConn
             $WhatIf = $using:test
             $vmName = $vm.Name
@@ -1831,6 +2262,7 @@ function Start-CleanupVMJob {
             $PSDefaultParameterValues = @{
                 'Write-Log:logDir' = $vamtLoggingDirectory
                 'Write-Log:logFileNamePrefix' = $envLogPrefix
+                'Write-Log:debugLogging' = $vamtDebugLogging
             }
             if (![string]::IsNullOrEmpty($vamtSyslogServer)) {
                 $PSDefaultParameterValues.Add('Write-Log:syslogServer', $vamtSyslogServer)
@@ -1839,11 +2271,11 @@ function Start-CleanupVMJob {
                 $PSDefaultParameterValues.Add('Write-Log:syslogPort', $vamtSyslogPort)
             }
             
+            Write-Log -logDefaults $PSDefaultParameterValues -severityLevel Info -logMessage "Starting cleanup process on '$($vm.Name)'."
+
             if (!!$using:snapshot) {
                 $snapshot = Get-VIObjectByVIView -MORef $using:snapshot.Id -Server $viConn
             }
-
-            Write-Log -severityLevel Info -logMessage "Starting cleanup process on '$($vm.Name)'."
 
             #delete the snapshot if it exists
             if (!!$snapshot) {
@@ -1875,7 +2307,7 @@ function Start-CleanupVMJob {
             try { Disconnect-VIServer * -Confirm:$false } catch {}
             throw $_
         }
-    } -InitializationScript ([scriptblock]::Create($jobFunctions)) -ArgumentList($viConn,$vm,$cred,$snapshot,$test,$scriptVars)
+    } -ArgumentList($viConn,$vm,$snapshot,$test,$scriptVars)
 
     return $cleanupJob 
 }
@@ -1922,7 +2354,7 @@ function Save-Report {
                 if ($null -eq $resProperty -or [string]::IsNullOrEmpty($resProperty)) {
                     $value = $unknownResult
                 } else {
-                    $value = $resProperty.ToString()
+                    $value = ($resProperty | %{$_.ToString()}) -join '; '
                 }
             }
             $object."$key" = $value
