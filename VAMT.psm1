@@ -596,6 +596,29 @@ function New-ScheduledExecution {
     }
 }
 
+function Get-VMFolderPath {
+    param (
+        [Parameter(Mandatory)]
+        $folder,
+
+        [Parameter()]
+        [switch]$showHidden
+    )
+        
+    $path = @()
+    while ($folder) {
+        $parent = $folder.Parent
+        if ($null -ne $parent -and $null -eq $parent.Parent -and !$showHidden) {
+            $folder = $parent
+        } else {
+            $path += $folder.Name
+            $folder = $parent
+        }
+    }
+    [Array]::Reverse($path)
+    return ($path -join "/")
+}
+
 function Confirm-Tags {
     param(
         [Parameter(Mandatory)]
@@ -1094,10 +1117,11 @@ function Confirm-MigrationTargets {
     #Additionaly, we will validate the network & storage selections with the context of the selected compute for each row.
     $missingPortGroups = @()
     $missingStorage = @()
-    
     #Validate that provided count of PGs and Datastores, is either 1 or equal to the count of NICs and Disks on each VM
     $invalidTgtPGs = @()
     $invalidTgtDSs = @()
+    #Validate that for each specified folder, exactly 1 exists with the given name and path (if applicable)
+    $invalidFolders = @()
 
     $migrationTargets = $inputs | %{
         $vmName = $_."$($inputHeaders.name)"
@@ -1105,6 +1129,7 @@ function Confirm-MigrationTargets {
         $computeName = $_."$($inputHeaders.compute)"
         $networkNames = $_."$($inputHeaders.network)"
         $storageNames = $_."$($inputHeaders.storage)"
+        $folderName = $_."$($inputHeaders.folder)"
 
         $vmObj = $vms | ?{$_.Name -eq $vmName}
         $srcViConn = $viConnections | ?{$_.Id -eq ($vmObj.Uid -Split 'VirtualMachine' | Select -First 1)}
@@ -1182,6 +1207,26 @@ function Confirm-MigrationTargets {
             $storage = $storageObjs[0]
         }
 
+        $folder = $null #null out the previous loop iteration.
+        if (![string]::IsNullOrEmpty($folderName)) {
+            if ($folderName.Split("/").count -eq 1) {
+                #Get the specified folder and filter out default hidden vm folder to avoid conflict.
+                $folder = Get-Folder -Name $folderName -Server $tgtViConn -ErrorAction SilentlyContinue | ?{ $_.Parent.ExtensionData.MoRef.Type -ne "Datacenter" }
+            } else {
+                $shortName = $folderName.Split("/")[-1]
+                $folder = Get-Folder -Name $shortName -Server $tgtViConn -ErrorAction SilentlyContinue | ? {
+                    $path = Get-VMFolderPath -folder $_ -showHidden:$false
+                    return ($path -eq $folderName)
+                }
+            }
+            
+            if ($null -eq $folder) {
+                $invalidFolders += "Could not find any folder with name or path '$folderName'"
+            } elseif ($folder.count -gt 1) {
+                $invalidFolders += "Found $($folder.count) folders with name '$folderName'."
+            }
+        }
+
         $validationErrors = @()
         $vmState = Get-VMStateBasedOnTag -vm $vmObj -viConn $srcViConn -stateTagsCatName $tagDetails.tagCatName
         $jobState = $vmState
@@ -1230,6 +1275,7 @@ function Confirm-MigrationTargets {
             tgt_compute = $computeObj
             tgt_network = $network
             tgt_storage = $storage
+            tgt_folder = $folder
             tgt_vcenter = $tgtViConn
             tag_state = $vmState
             job_state = $jobState
@@ -1246,6 +1292,13 @@ function Confirm-MigrationTargets {
 
     if (($invalidTgtPGs.Length + $invalidTgtDSs.Length) -gt 0) {
         $invalidMessage = "The following machines in the inputs file have target network or storage destinations that do not match the number of Net Adapters or Disks attached to the VM in vCenter.`n`tInvalid Net Targets: $($invalidTgtPGs -join ', ')`n`tInvalid Storage Targets: $($invalidTgtDSs -join ', ')"
+        Write-Log -severityLevel Error -logMessage $invalidMessage
+        throw $invalidMessage
+    }
+
+    if ($invalidFolders.Length -gt 0) {
+        $uniqueErrors = $invalidFolders | select -Unique
+        $invalidMessage = "The following errors were encountered when validating the target vm folders for this migration. Be sure to specify a full folder path (Format: 'Datacenter/topfolder/middlefolder/bottomfolder') if your desired foldername is duplicated anywhere in your folder tree in your target vCenter.`nFolder validation Errors:`n`t$($uniqueErrors -join ",`n`t")"
         Write-Log -severityLevel Error -logMessage $invalidMessage
         throw $invalidMessage
     }
@@ -1644,6 +1697,9 @@ function Start-MigrateVMJob {
         [ValidateNotNullOrEmpty()]
         $network,
 
+        [Parameter()]
+        $vmfolder,
+
         [Parameter(Mandatory)]
         [ValidateNotNullOrEmpty()]
         $storage,
@@ -1662,7 +1718,7 @@ function Start-MigrateVMJob {
     if ($null -eq $srcViConn.Credential -or $null -eq $tgtViConn.Credential) {
         throw "This function only supports VI Connections created with VAMT\Initialize-VIServer"
     }
-
+    
     $test = !!$WhatIf
     $retry = !!$isRetry
     $migrationJob = Start-Job -ScriptBlock {
@@ -1684,6 +1740,14 @@ function Start-MigrateVMJob {
             #continue to preserve the network type (array vs not) as we're relying on this to determine if we're doing multi nic/datastore migration
             $network = Get-VIObjectByObject -refObject $using:network -Server $tgtViConn
             $storage = Get-VIObjectByObject -refObject $using:storage -Server $tgtViConn
+            try { #since vmfolder is optional, we must account for it being null. This try will catch the exception from loading a null variable with '$using:XXXXX'
+                $vmfolder = $using:vmfolder
+            } catch {
+                $vmfolder = $null
+            }
+            if ($null -ne $vmfolder) {
+                $vmfolder = Get-VIObjectByVIView -MORef $vmfolder.Id -Server $tgtViConn
+            }
             $WhatIf = $using:test
             $isRetry = $using:retry
             $vmName = $vm.Name
@@ -1794,6 +1858,10 @@ function Start-MigrateVMJob {
             $currentResPool = Get-VIObjectByVIView -MORef $currentRpId -Server $srcViConn
             if ($tgtViConn.InstanceUuid -ne $srcViConn.InstanceUuid -or $compute.Id -notin @($currentHostId, $currentRpId, $currentResPool.ExtensionData.Owner.ToString())) {
                 $moveParameters.Destination = $compute
+            }
+
+            if ($null -ne $vmfolder -and ($tgtViConn.InstanceUuid -ne $srcViConn.InstanceUuid -or $currentFolderId -ne $vmfolder.Id)) {
+                $moveParameters.InventoryLocation = $vmfolder
             }
 
             #catch incase nothing is apparently moving, maybe move has already occured or a mistake was made.
@@ -1953,7 +2021,7 @@ function Start-MigrateVMJob {
             try { Disconnect-VIServer * -Confirm:$false } catch {}
             throw $_
         }
-    } -ArgumentList($srcViConn,$tgtViConn,$vm,$compute,$network,$storage,$retry,$test,$scriptVars)
+    } -ArgumentList($srcViConn,$tgtViConn,$vm,$compute,$network,$vmfolder,$storage,$retry,$test,$scriptVars)
     #Debug-Job -Job $migrationJob
     return $migrationJob 
 }

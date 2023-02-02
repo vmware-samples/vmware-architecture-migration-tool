@@ -261,6 +261,7 @@ $inputHeaders = @{
     compute = "target_hostpoolcluster"
     network = "target_portgroup"
     storage = "target_datastore"
+    folder = "target_folder"
 }
 
 $scriptVars = (Get-Variable -Scope Script -Include "vamt*")
@@ -333,6 +334,7 @@ $inputs | %{
         [String]::IsNullOrWhiteSpace($_."$($inputHeaders.compute)") -or
         [String]::IsNullOrWhiteSpace($_."$($inputHeaders.network)") -or
         [String]::IsNullOrWhiteSpace($_."$($inputHeaders.storage)")
+        #No need to check folder as it's not required.
     ) {
         $errorLines += [String]($inputs.IndexOf($_)+1)
     }
@@ -554,10 +556,14 @@ if ($action -in @("migrate","rollback")) {
                     isRetry = ($_.attempts -gt 0)
                     scriptVars = $scriptVars
                 }
+                if ($null -ne $_.tgt_folder) {
+                    $jobParams.vmfolder = $_.tgt_folder
+                }
+
                 if ($action -eq "migrate") {
                     $_.job = Start-MigrateVMJob @jobParams -compute $_.tgt_compute -storage $_.tgt_storage
                 } elseif ($action -eq "rollback") {
-                    $_.job = Start-RollbackVMJob @jobParams -vmhost $_.tgt_host -respool $_.tgt_respool -vmfolder $_.tgt_folder -datastore $_.tgt_datastore -snapshot $_.tgt_snapshot
+                    $_.job = Start-RollbackVMJob @jobParams -vmhost $_.tgt_host -respool $_.tgt_respool -datastore $_.tgt_datastore -snapshot $_.tgt_snapshot
                 }
                 $_.job_state = $jobInProgress
                 $_.attempts++
@@ -569,6 +575,8 @@ if ($action -in @("migrate","rollback")) {
         }
     }
 
+    #Cleanup $null target folders for report.
+    $migrationTargets | %{if ($null -eq $_.tgt_folder) {$_.tgt_folder = "N/A"}}
     Write-Log -severityLevel Info -logMessage "$action target states:`n$($migrationTargets | ft | Out-String)"
     $finalObj = Save-Report -actionResult $migrationTargets -loggingDirectory $vamtLoggingDirectory
 } elseif ($action -eq "cleanup") {
