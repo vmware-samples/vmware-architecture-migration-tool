@@ -857,10 +857,10 @@ function Get-VIObjectByObject {
         [VMware.VimAutomation.ViCore.Impl.V1.VIServerImpl]$Server
     )
 
-    if ($refObject -is [array]) {
+    if ($refObject.count -gt 1) {
         $obj = @()
-        foreach ($id in $refObject.Id) {
-            $obj += Get-VIObjectByVIView -MORef $id -Server $Server
+        foreach ($element in $refObject) {
+            $obj += Get-VIObjectByVIView -MORef $element.Id -Server $Server
         }
     } else {
         $obj = Get-VIObjectByVIView -MORef $refObject.Id -Server $Server
@@ -1122,6 +1122,8 @@ function Confirm-MigrationTargets {
     $invalidTgtDSs = @()
     #Validate that for each specified folder, exactly 1 exists with the given name and path (if applicable)
     $invalidFolders = @()
+    #make sure the current NIC isnt null, will break rollback.
+    $invalidNICs = @()
 
     $migrationTargets = $inputs | %{
         $vmName = $_."$($inputHeaders.name)"
@@ -1158,9 +1160,12 @@ function Confirm-MigrationTargets {
                 $missingPortGroups += $networkName
             }
         }
-
+        $vmNICs = $vmObj | Get-NetworkAdapter
+        $invalidAdapters = $vmNICs | ?{$null -eq $_.NetworkName}
+        if ($null  -ne $invalidAdapters) {
+            $invalidNICs += $vmObj.Name
+        }
         if ($networkNames -is [array]) {
-            $vmNICs = $vmObj | Get-NetworkAdapter
             if ($vmNICs.count -ne $networkObjs.count) {
                 $invalidTgtPGs += $vmObj.Name
             }
@@ -1292,6 +1297,12 @@ function Confirm-MigrationTargets {
 
     if (($invalidTgtPGs.Length + $invalidTgtDSs.Length) -gt 0) {
         $invalidMessage = "The following machines in the inputs file have target network or storage destinations that do not match the number of Net Adapters or Disks attached to the VM in vCenter.`n`tInvalid Net Targets: $($invalidTgtPGs -join ', ')`n`tInvalid Storage Targets: $($invalidTgtDSs -join ', ')"
+        Write-Log -severityLevel Error -logMessage $invalidMessage
+        throw $invalidMessage
+    }
+
+    if ($invalidNICs.Length -gt 0) {
+        $invalidMessage = "The following machines in the inputs file have network adapters with misconfigured portgroups. This will break rollback functionality.`n`tInvalid Net Adapters: $($invalidNICs -join ', ')"
         Write-Log -severityLevel Error -logMessage $invalidMessage
         throw $invalidMessage
     }
@@ -1722,34 +1733,31 @@ function Start-MigrateVMJob {
     $test = !!$WhatIf
     $retry = !!$isRetry
     $migrationJob = Start-Job -ScriptBlock {
+        param ($srcViConn,$tgtViConn,$vm,$compute,$network,$vmfolder,$storage,$retry,$test,$scriptVars)
+
         try {
             #Wait-Debugger
-            $using:scriptVars | %{ New-Variable -Name $_.Name -Value $_.Value}
+            $scriptVars | %{ New-Variable -Name $_.Name -Value $_.Value}
             #Import VAMT functions module
             if(!(Test-Path "$vamtWorkingDirectory/VAMT.psm1")){
                 throw "VAMT functions module ($vamtWorkingDirectory/VAMT.psm1) was not found. Quiting now. - $(Get-Date)"
             }
             Import-Module -Name "$vamtWorkingDirectory/VAMT.psm1"
             #Had to move away from using the session secret due to PowerCLI/vC Lookup Service issue when running inside of a PS Job
-            #$viConn = Connect-ViServer -Server $using:viConn -Session $using:viConn.SessionSecret
-            $srcViConn = Initialize-VIServer -vCenters $using:srcViConn.Name -Credential $using:srcViConn.Credential
-            $tgtViConn = Initialize-VIServer -vCenters $using:tgtViConn.Name -Credential $using:tgtViConn.Credential
+            #$viConn = Connect-ViServer -Server $viConn -Session $viConn.SessionSecret
+            $srcViConn = Initialize-VIServer -vCenters $srcViConn.Name -Credential $srcViConn.Credential
+            $tgtViConn = Initialize-VIServer -vCenters $tgtViConn.Name -Credential $tgtViConn.Credential
 
-            $vm = Get-VIObjectByVIView -MORef $using:vm.Id -Server $srcViConn
-            $compute = Get-VIObjectByVIView -MORef $using:compute.Id -Server $tgtViConn
+            $vm = Get-VIObjectByVIView -MORef $vm.Id -Server $srcViConn
+            $compute = Get-VIObjectByVIView -MORef $compute.Id -Server $tgtViConn
             #continue to preserve the network type (array vs not) as we're relying on this to determine if we're doing multi nic/datastore migration
-            $network = Get-VIObjectByObject -refObject $using:network -Server $tgtViConn
-            $storage = Get-VIObjectByObject -refObject $using:storage -Server $tgtViConn
-            try { #since vmfolder is optional, we must account for it being null. This try will catch the exception from loading a null variable with '$using:XXXXX'
-                $vmfolder = $using:vmfolder
-            } catch {
-                $vmfolder = $null
-            }
-            if ($null -ne $vmfolder) {
+            $network = Get-VIObjectByObject -refObject $network -Server $tgtViConn
+            $storage = Get-VIObjectByObject -refObject $storage -Server $tgtViConn
+            if ($null -ne $vmfolder) { #since vmfolder is optional, we must account for it being null.
                 $vmfolder = Get-VIObjectByVIView -MORef $vmfolder.Id -Server $tgtViConn
             }
-            $WhatIf = $using:test
-            $isRetry = $using:retry
+            $WhatIf = $test
+            $isRetry = $retry
             $vmName = $vm.Name
             $Script:envLogPrefix = $vmName
             $PSDefaultParameterValues = @{
@@ -2015,7 +2023,9 @@ function Start-MigrateVMJob {
                 result = "Successfully moved VM '$($vm.Name)'."
             }
         } catch {
-            $message = "Caught excecption in migration job:`n$_"
+            $exceptionMessage = $_.Exception.Message
+            $lineNumber = $_.InvocationInfo.ScriptLineNumber
+            $message = "Caught excecption in migration job on line '$lineNumber':`n$exceptionMessage"
             Write-Log -severityLevel Error -logMessage $message -skipConsole
             Write-Error $message
             try { Disconnect-VIServer * -Confirm:$false } catch {}
@@ -2082,27 +2092,28 @@ function Start-RollbackVMJob {
     $test = !!$WhatIf
     $retry = !!$isRetry
     $rollbackJob = Start-Job -ScriptBlock {
+        param ($srcViConn,$tgtViConn,$vm,$vmhost,$respool,$network,$vmfolder,$datastore,$snapshot,$retry,$test,$scriptVars)
         try {
-            $using:scriptVars | %{ New-Variable -Name $_.Name -Value $_.Value}
+            $scriptVars | %{ New-Variable -Name $_.Name -Value $_.Value}
             #Import VAMT functions module
             if(!(Test-Path "$vamtWorkingDirectory/VAMT.psm1")){
                 throw "VAMT functions module ($vamtWorkingDirectory/VAMT.psm1) was not found. Quiting now. - $(Get-Date)"
             }
             Import-Module -Name "$vamtWorkingDirectory/VAMT.psm1"
             
-            $srcViConn = Initialize-VIServer -vCenters $using:srcViConn.Name -Credential $using:srcViConn.Credential
-            $tgtViConn = Initialize-VIServer -vCenters $using:tgtViConn.Name -Credential $using:tgtViConn.Credential
+            $srcViConn = Initialize-VIServer -vCenters $srcViConn.Name -Credential $srcViConn.Credential
+            $tgtViConn = Initialize-VIServer -vCenters $tgtViConn.Name -Credential $tgtViConn.Credential
 
-            $vm = Get-VIObjectByVIView -MORef $using:vm.Id -Server $srcViConn
+            $vm = Get-VIObjectByVIView -MORef $vm.Id -Server $srcViConn
             $vmName = $vm.Name
-            $vmhost = Get-VIObjectByVIView -MORef $using:vmhost.Id -Server $tgtViConn
-            $respool = Get-VIObjectByVIView -MORef $using:respool.Id -Server $tgtViConn
-            $network = Get-VIObjectByVIView -MORef $using:network.Id -Server $tgtViConn
-            $vmfolder = Get-VIObjectByVIView -MORef $using:vmfolder.Id -Server $tgtViConn
-            $datastore = Get-VIObjectByVIView -MORef $using:datastore.Id -Server $tgtViConn
-            $snapshotName = $using:snapshot.Name
-            $WhatIf = $using:test
-            $isRetry = $using:retry
+            $vmhost = Get-VIObjectByVIView -MORef $vmhost.Id -Server $tgtViConn
+            $respool = Get-VIObjectByVIView -MORef $respool.Id -Server $tgtViConn
+            $network = Get-VIObjectByObject -refObject $network -Server $tgtViConn
+            $vmfolder = Get-VIObjectByVIView -MORef $vmfolder.Id -Server $tgtViConn
+            $datastore = Get-VIObjectByObject -refObject $datastore -Server $tgtViConn
+            $snapshotName = $snapshot.Name
+            $WhatIf = $test
+            $isRetry = $retry
             $Script:envLogPrefix = $vmName
             $PSDefaultParameterValues = @{
                 'Write-Log:logDir' = $vamtLoggingDirectory
@@ -2280,7 +2291,9 @@ function Start-RollbackVMJob {
                 result = "Successfully rolled back VM '$($vm.Name)'."
             }
         } catch {
-            $message = "Caught excecption in rollback job:`n$_"
+            $exceptionMessage = $_.Exception.Message
+            $lineNumber = $_.InvocationInfo.ScriptLineNumber
+            $message = "Caught excecption in rollback job on line '$lineNumber':`n$exceptionMessage"
             Write-Log -severityLevel Error -logMessage $message -skipConsole
             Write-Error $message
             try { Disconnect-VIServer * -Confirm:$false } catch {}
@@ -2314,17 +2327,18 @@ function Start-CleanupVMJob {
 
     $test = !!$WhatIf
     $cleanupJob = Start-Job -ScriptBlock {
+        param ($viConn,$vm,$snapshot,$test,$scriptVars)
         try {
-            $using:scriptVars | %{ New-Variable -Name $_.Name -Value $_.Value}
+            $scriptVars | %{ New-Variable -Name $_.Name -Value $_.Value}
             #Import VAMT functions module
             if(!(Test-Path "$vamtWorkingDirectory/VAMT.psm1")){
                 throw "VAMT functions module ($vamtWorkingDirectory/VAMT.psm1) was not found. Quiting now. - $(Get-Date)"
             }
             Import-Module -Name "$vamtWorkingDirectory/VAMT.psm1"
-            $viConn = Initialize-VIServer -vCenters $using:viConn.Name -Credential $using:viConn.Credential
+            $viConn = Initialize-VIServer -vCenters $viConn.Name -Credential $viConn.Credential
 
-            $vm = Get-VIObjectByVIView -MORef $using:vm.Id -Server $viConn
-            $WhatIf = $using:test
+            $vm = Get-VIObjectByVIView -MORef $vm.Id -Server $viConn
+            $WhatIf = $test
             $vmName = $vm.Name
             $Script:envLogPrefix = $vmName
             $PSDefaultParameterValues = @{
@@ -2341,8 +2355,8 @@ function Start-CleanupVMJob {
             
             Write-Log -logDefaults $PSDefaultParameterValues -severityLevel Info -logMessage "Starting cleanup process on '$($vm.Name)'."
 
-            if (!!$using:snapshot) {
-                $snapshot = Get-VIObjectByVIView -MORef $using:snapshot.Id -Server $viConn
+            if (!!$snapshot) {
+                $snapshot = Get-VIObjectByVIView -MORef $snapshot.Id -Server $viConn
             }
 
             #delete the snapshot if it exists
@@ -2369,7 +2383,9 @@ function Start-CleanupVMJob {
                 result = "Successfully cleaned up VM '$($vm.Name)'."
             }
         } catch {
-            $message = "Caught excecption in cleanup job:`n$_"
+            $exceptionMessage = $_.Exception.Message
+            $lineNumber = $_.InvocationInfo.ScriptLineNumber
+            $message = "Caught excecption in cleanup job on line '$lineNumber':`n$exceptionMessage"
             Write-Log -severityLevel Error -logMessage $message -skipConsole
             Write-Error $message
             try { Disconnect-VIServer * -Confirm:$false } catch {}
