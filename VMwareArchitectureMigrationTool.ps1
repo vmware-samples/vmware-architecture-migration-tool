@@ -1,4 +1,4 @@
-<#
+﻿<#
     .NOTES
     ===========================================================================
      Created by:    Austin Browder
@@ -6,7 +6,7 @@
      Organization:  VMware Professional Services
     ===========================================================================
     .SYNOPSIS
-        The VMware Architecture Migration Tool is designed to provide an easy and automated process to 
+        The VMware Architecture Migration Tool is designed to provide an easy and automated process to
         migrate machines between clusters of different architecture types within the same or co-located vCenters.
     .DESCRIPTION
         Script that performs cold migration on VMs between two compute environments during a specified change window.
@@ -45,7 +45,7 @@ param(
     [ValidateNotNullOrEmpty()]
     [String[]]$vCenters,
 
-    [Parameter()] <# Optional: If not set, the user will be prompted for a credential and that credential will be stored (encrypted) on the filesystem. 
+    [Parameter()] <# Optional: If not set, the user will be prompted for a credential and that credential will be stored (encrypted) on the filesystem.
                     Note: This is an ordered list that will correspond to the vCenters intput. You can pass 1 credential for all vCenters, or 1 credential per vCenter.#>
     [ValidateNotNullOrEmpty()]
     [PSCredential[]]$vcCredentials,
@@ -70,7 +70,7 @@ param(
     [Parameter(Mandatory,ParameterSetName='Email')] <# Optional: ip/fqdn:port - port optional #>
     [ValidateNotNullOrEmpty()]
     [String]$smtpServer,
-    
+
     [Parameter(Mandatory,ParameterSetName='Email')] <# Required if smtpServer is specified #>
     [ValidateNotNullOrEmpty()]
     [String[]]$toEmail,
@@ -85,10 +85,10 @@ param(
 
     [Parameter(ParameterSetName='Email')] <# Optional #>
     [Switch]$useMailCred,
-    
+
     [Parameter()] <# force poweroff if initial clean shutdown times out #>
     [Switch]$ignoreVmTools,
-    
+
     [Parameter()] <# force poweroff if initial clean shutdown times out #>
     [Switch]$forcePowerOff,
 
@@ -97,8 +97,8 @@ param(
 
     [Parameter(ParameterSetName='Email')] <# Optional #>
     [Switch]$smtpUseSsl,
-    
-    [Parameter()] 
+
+    [Parameter()]
     [Switch]$debugLogging,
 
     [Parameter()] <# whatif will establish a connection to the provided vCenter and go through the logic for each machine without actually moving it #>
@@ -114,7 +114,7 @@ param(
 #############################################################################################################################
 
 #Validate vCenters input
-if ($vCenters.count -ne $($vCenters.toLower() | Select -Unique).count) {
+if ($vCenters.count -ne $($vCenters.toLower() | Select-Object -Unique).count) {
     throw "Duplicate vCenters found in 'vCenters' inputs."
 }
 
@@ -140,7 +140,7 @@ if (($null -eq $vcCredentials) -or ($vcCredentials.count -eq 1) -or ($vcCredenti
 if (![string]::IsNullOrWhiteSpace($syslogHost)) {
     $Script:vamtSyslogServer = $syslogHost.Split(":")[0].trim()
     if ([string]::IsNullOrEmpty($syslogHost.Split(":")[1])) {
-        $Script:vamtSyslogPort = 514   
+        $Script:vamtSyslogPort = 514
     } else {
         [Int]$Script:vamtSyslogPort = $syslogHost.Split(":")[1].trim()
     }
@@ -149,7 +149,7 @@ if (![string]::IsNullOrWhiteSpace($syslogHost)) {
 $Script:vamtDebugLogging = !!$debugLogging
 $Script:vamtCredentialDirectory = "$env:userprofile\documents"
 if ([string]::IsNullOrEmpty($PSScriptRoot)) {
-    $Script:vamtWorkingDirectory = Get-Location | Select -ExpandProperty Path
+    $Script:vamtWorkingDirectory = Get-Location | Select-Object -ExpandProperty Path
 } else {
     $Script:vamtWorkingDirectory = $PSScriptRoot
 }
@@ -162,7 +162,7 @@ $Script:vamtAction = [cultureinfo]::GetCultureInfo("en-US").TextInfo.ToTitleCase
 if (![string]::IsNullOrWhiteSpace($smtpServer)) {
     $Script:vamtSmtpServer = $smtpServer.Split(":")[0].trim()
     if ([string]::IsNullOrEmpty($smtpServer.Split(":")[1])) {
-        $Script:vamtSmtpPort = 25   
+        $Script:vamtSmtpPort = 25
     } else {
         [Int]$Script:vamtSmtpPort = $smtpServer.Split(":")[1].trim()
     }
@@ -320,14 +320,14 @@ try {
             #failed to parse as a json file to try to import as csv. Issues will be flushed out in validation below.
             $inputs = Import-Csv -Path $inputFilePath
         }
-    }    
+    }
 } catch {
     Write-Log -severityLevel Error -logMessage "Failed to import inputs file located at '$inputFilePath'. Error:`n`t$($_.Exception.message)"
     throw $_
 }
 
 $errorLines = @()
-$inputs | %{
+$inputs | ForEach-Object {
     if (
         [String]::IsNullOrWhiteSpace($_."$($inputHeaders.name)") -or
         [String]::IsNullOrWhiteSpace($_."$($inputHeaders.vcenter)") -or
@@ -346,10 +346,10 @@ if ($errorLines.Length -gt 0) {
     throw $message
 }
 
-$vmnames = $inputs.vmname | select -Unique
-$duplicates = Compare-object -referenceobject $inputs.vmname -differenceobject $vmnames 
+$vmnames = $inputs.vmname | Select-Object -Unique
+$duplicates = Compare-object -referenceobject $inputs.vmname -differenceobject $vmnames
 if ($duplicates.InputObject.Length -gt 0) {
-    $message = "The following VM names were found more than once ($(($duplicates.InputObject | Sort | Get-Unique) -join ', ')) in the inputs CSV file."
+    $message = "The following VM names were found more than once ($(($duplicates.InputObject | Sort-Object | Get-Unique) -join ', ')) in the inputs CSV file."
     Write-Log -severityLevel Error -logMessage $message
     throw $message
 }
@@ -368,7 +368,7 @@ if ($authenticatedEmail) {
 
 #First clear any active or stale VI Connections from this session.
 try { Disconnect-VIServer * -Confirm:$false } catch {}
-$viConnections = $vCenters | %{
+$viConnections = $vCenters | ForEach-Object {
     Initialize-VIServer -vCenters $_ -Credential $vcCredentialTable[$_] -credentialDirectory $vamtCredentialDirectory
 }
 #Validate that all Tags and Categories required for the migration exist in all specified vCenters.
@@ -429,12 +429,12 @@ if (!!$startTime) {
         } else {
             Write-Log -severityLevel Info -logMessage "Current time ($vamtScriptLaunchTime) is before the beginning of the specified change window start time ($startTime). Whatif enabled. Continuing with Script."
         }
-        
+
     } elseif (Confirm-InChangeWindow -executeTime $vamtScriptLaunchTime -startWindow $startTime -endWindow $endTime) {
         # we are in the change window now
         Write-Log -severityLevel Info -logMessage "Current time ($vamtScriptLaunchTime) is within the specified change window. Proceeding with script now."
     } else {
-        #we are after the change window. 
+        #we are after the change window.
         Write-Log -severityLevel Warn -logMessage "Current time ($vamtScriptLaunchTime) is after the end of the specified change window end time ($endTime). Nothing to do. Exiting."
         return
     }
@@ -451,11 +451,11 @@ if (!!$startTime) {
 
 if ($action -in @("migrate","rollback")) {
     #Migration & Rollback tasks
-    Write-Log -severityLevel Info -logMessage "Pre-$action target states:`n$($migrationTargets | ft | Out-String)"
+    Write-Log -severityLevel Info -logMessage "Pre-$action target states:`n$($migrationTargets | Format-Table | Out-String)"
 
-    while(([array]($migrationTargets | ?{$_.job_state -notin $doNotRunStates})).count -gt 0) {
+    while(([array]($migrationTargets | Where-Object {$_.job_state -notin $doNotRunStates})).count -gt 0) {
         #check and update job progress
-        $migrationTargets | ?{$_.job_state -eq $jobInProgress} | %{
+        $migrationTargets | Where-Object {$_.job_state -eq $jobInProgress} | ForEach-Object {
             $job = $_.job.ChildJobs
             #Job states: https://docs.microsoft.com/en-us/dotnet/api/system.management.automation.jobstate
             if ($job.State -ne $jobInProgress) {
@@ -465,7 +465,7 @@ if ($action -in @("migrate","rollback")) {
                         $_.job_state = $jobComplete
                         $_.tag_state = Get-VMStateBasedOnTag -vm $_.tgt_vm -viConn $viConnections -stateTagsCatName $vamtTagDetails.tagCatName
                     } else {
-                        Write-Log -severityLevel Warn "VM move job for '$($_.tgt_vm.Name)' completed with unhandled errors. Considering it '$jobCompleteWithErrors'. Errors:`n$(($job.Error | %{ if (!!$_) {$_.ToString()}}) -join "`n")"
+                        Write-Log -severityLevel Warn "VM move job for '$($_.tgt_vm.Name)' completed with unhandled errors. Considering it '$jobCompleteWithErrors'. Errors:`n$(($job.Error | ForEach-Object { if (!!$_) {$_.ToString()}}) -join "`n")"
                         $_.job_state = $jobCompleteWithErrors
                         $_.tag_state = Set-VMStateTag -vm $_.tgt_vm -tagName $vamtTagDetails.completeWithErrorsTagName -stateTagsCatName $vamtTagDetails.tagCatName -WhatIf:(!!$WhatIf) -viConn $viConnections
                     }
@@ -493,7 +493,7 @@ if ($action -in @("migrate","rollback")) {
                 }
             }
         }
-        if (([array]($migrationTargets | ?{$_.job_state -notin $doNotRunStates})).count -le 0) {
+        if (([array]($migrationTargets | Where-Object {$_.job_state -notin $doNotRunStates})).count -le 0) {
             break
         }
         #check if changewindow is complete
@@ -503,31 +503,31 @@ if ($action -in @("migrate","rollback")) {
                 if ($parallelTaskCount -gt 0) {
                     Write-Log -severityLevel Warn -logMessage "We are nolonger inside our change window. Turning the job throttle down to 0. All currently in progress tasks will be allowed to finish."
                     $parallelTaskCount = 0
-                    $migrationTargets | ?{$_.job_state -eq $jobReady} | %{ 
+                    $migrationTargets | Where-Object {$_.job_state -eq $jobReady} | ForEach-Object {
                         $_.job = "Job not executed due to being past the end of the change window."
                         $_.job_state = $jobNotRun
                     }
                 }
-                if (([array]($migrationTargets | ?{$_.job_state -eq $jobInProgress})).count -le 0) {
+                if (([array]($migrationTargets | Where-Object {$_.job_state -eq $jobInProgress})).count -le 0) {
                     break
                 }
             }
         }
-        
+
         #calculate how many slots for new jobs we have
-        [int]$movesInProgress = ([array]($migrationTargets | ?{$_.job_state -eq $jobInProgress})).count
-        [int]$pendingMoves = ([array]($migrationTargets | ?{$_.job_state -like "*pendingRetry" -or $_.job_state -eq $jobReady})).count
+        [int]$movesInProgress = ([array]($migrationTargets | Where-Object {$_.job_state -eq $jobInProgress})).count
+        [int]$pendingMoves = ([array]($migrationTargets | Where-Object {$_.job_state -like "*pendingRetry" -or $_.job_state -eq $jobReady})).count
         $currentThrottle = [math]::Max(0, ($parallelTaskCount - $movesInProgress))
         Write-Log -severityLevel Info -logMessage "There are currently $movesInProgress moves in progress and $pendingMoves moves waiting to start."
 
-        [array]$batch = $migrationTargets | Sort-Object -Property attempts | ?{$_.job_state -eq $jobReady} | Select -First $currentThrottle 
+        [array]$batch = $migrationTargets | Sort-Object -Property attempts | Where-Object {$_.job_state -eq $jobReady} | Select-Object -First $currentThrottle
         if ($batch.count -lt $currentThrottle) {
-            $batch += $migrationTargets | Sort-Object -Property attempts | ?{$_.job_state -like "*pendingRetry"} | Select -First ($currentThrottle-$batch.count)
+            $batch += $migrationTargets | Sort-Object -Property attempts | Where-Object {$_.job_state -like "*pendingRetry"} | Select-Object -First ($currentThrottle-$batch.count)
         }
         #launch new jobs
         if ($batch.count -gt 0) {
             Write-Log -severityLevel Info -logMessage "New batch of moves: $($batch.tgt_vm.Name -join ", ")"
-            $batch | %{
+            $batch | ForEach-Object {
                 $vm = $_.tgt_vm
                 $srcViConn = $_.src_vcenter
                 $tgtViConn = $_.tgt_vcenter
@@ -570,21 +570,21 @@ if ($action -in @("migrate","rollback")) {
             }
         }
 
-        if (([array]($migrationTargets | ?{$_.job_state -eq $jobInProgress})).count -gt 0) {
+        if (([array]($migrationTargets | Where-Object {$_.job_state -eq $jobInProgress})).count -gt 0) {
             Start-Sleep -Seconds $jobControllerRefreshInterval
         }
     }
 
     #Cleanup $null target folders for report.
-    $migrationTargets | %{if ($null -eq $_.tgt_folder) {$_.tgt_folder = "N/A"}}
-    Write-Log -severityLevel Info -logMessage "$action target states:`n$($migrationTargets | ft | Out-String)"
+    $migrationTargets | ForEach-Object {if ($null -eq $_.tgt_folder) {$_.tgt_folder = "N/A"}}
+    Write-Log -severityLevel Info -logMessage "$action target states:`n$($migrationTargets | Format-Table | Out-String)"
     $finalObj = Save-Report -actionResult $migrationTargets -loggingDirectory $vamtLoggingDirectory
 } elseif ($action -eq "cleanup") {
-    Write-Log -severityLevel Info -logMessage "Pre-$action target states:`n$($cleanupTargets | ft | Out-String)"
+    Write-Log -severityLevel Info -logMessage "Pre-$action target states:`n$($cleanupTargets | Format-Table | Out-String)"
     #Cleanup task
-    while(([array]($cleanupTargets | ?{$_.job_state -notin $cleanupCompleteStates})).count -gt 0) {
+    while(([array]($cleanupTargets | Where-Object {$_.job_state -notin $cleanupCompleteStates})).count -gt 0) {
         #check and update job progress
-        $cleanupTargets | ?{$_.job_state -eq $jobInProgress} | %{
+        $cleanupTargets | Where-Object {$_.job_state -eq $jobInProgress} | ForEach-Object {
             $job = $_.job.ChildJobs
             #Job states: https://docs.microsoft.com/en-us/dotnet/api/system.management.automation.jobstate
             if ($job.State -ne $jobInProgress) {
@@ -620,23 +620,23 @@ if ($action -in @("migrate","rollback")) {
                     $_.job_state = $jobFailed
                     $_.tag_state = Get-VMStateBasedOnTag -vm $_.clean_vm -viConn $viConnections -stateTagsCatName $vamtTagDetails.tagCatName
                 }
-            }            
+            }
         }
-        if (([array]($cleanupTargets | ?{$_.job_state -notin $cleanupCompleteStates})).count -le 0) {
+        if (([array]($cleanupTargets | Where-Object {$_.job_state -notin $cleanupCompleteStates})).count -le 0) {
             break
         }
-        
+
         #calculate how many slots for new jobs we have
-        [int]$cleansInProgress = ([array]($cleanupTargets | ?{$_.job_state -eq $jobInProgress})).count
-        [int]$pendingCleans = ([array]($cleanupTargets | ?{$_.job_state -like "*pendingRetry" -or $_.job_state -eq $jobReady})).count
+        [int]$cleansInProgress = ([array]($cleanupTargets | Where-Object {$_.job_state -eq $jobInProgress})).count
+        [int]$pendingCleans = ([array]($cleanupTargets | Where-Object {$_.job_state -like "*pendingRetry" -or $_.job_state -eq $jobReady})).count
         $currentThrottle = [math]::Max(0, ($parallelTaskCount - $cleansInProgress))
         Write-Log -severityLevel Info -logMessage "There are currently $cleansInProgress cleanups in progress and $pendingCleans cleanups waiting to start."
 
-        [array]$batch = $cleanupTargets | ?{$_.job_state -eq $readyToCleanup} | Select -First $currentThrottle
+        [array]$batch = $cleanupTargets | Where-Object {$_.job_state -eq $readyToCleanup} | Select-Object -First $currentThrottle
         #launch new jobs
         if ($batch.count -gt 0) {
             Write-Log -severityLevel Info -logMessage "New batch of cleanups: $($batch.clean_vm.Name -join ", ")"
-            $batch | %{
+            $batch | ForEach-Object {
                 $vm = $_.clean_vm
                 $viConn = $_.clean_vc
 
@@ -660,12 +660,12 @@ if ($action -in @("migrate","rollback")) {
             }
         }
 
-        if (([array]($cleanupTargets | ?{$_.job_state -eq $jobInProgress})).count -gt 0) {
+        if (([array]($cleanupTargets | Where-Object {$_.job_state -eq $jobInProgress})).count -gt 0) {
             Start-Sleep -Seconds $jobControllerRefreshInterval
         }
     }
 
-    Write-Log -severityLevel Info -logMessage "Post-$action VM states:`n$($cleanupTargets | ft | Out-String)"
+    Write-Log -severityLevel Info -logMessage "Post-$action VM states:`n$($cleanupTargets | Format-Table | Out-String)"
     $finalObj = Save-Report -actionResult $cleanupTargets -loggingDirectory $vamtLoggingDirectory
 } else {
     #unhandled action fail
@@ -680,9 +680,9 @@ $finalMessage += "`n`tScript runtime: $(($currentTime - $vamtScriptLaunchTime).M
 $finalMessage += "`n`tScript completion: '$currentTime'"
 $finalMessage += "`n`tTotal VM targets in migration run: $($finalObj.count)"
 $notAttemptedCount = 0
-$finalObj.job_state | select -Unique | %{
+$finalObj.job_state | Select-Object -Unique | ForEach-Object {
     $state = $_
-    $jobs = $finalObj | ?{$_.job_state -eq $state}
+    $jobs = $finalObj | Where-Object {$_.job_state -eq $state}
     if ($state -notin $jobStates.Values) {
         $finalMessage += "`n`tVM migration jobs with final status '$state': $($jobs.count)"
     } else {
@@ -695,7 +695,7 @@ if ($notAttemptedCount -gt 0) {
 
 
 Write-Log -severityLevel Info -logMessage $finalMessage
-Write-Log -severityLevel Info -logMessage "Final report:`n$($finalObj | ft | Out-String)"
+Write-Log -severityLevel Info -logMessage "Final report:`n$($finalObj | Format-Table | Out-String)"
 
 if (![string]::IsNullOrWhiteSpace($smtpServer)) {
     try {
