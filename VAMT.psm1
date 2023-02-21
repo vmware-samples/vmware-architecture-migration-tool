@@ -2011,13 +2011,18 @@ function Start-MigrateVMJob {
                 result = "Successfully moved VM '$($vm.Name)'."
             }
         } catch {
-            $exceptionMessage = $_.Exception.Message
-            $lineNumber = $_.InvocationInfo.ScriptLineNumber
+            $exception = $_
+            $exceptionMessage = $exception.Exception.Message
+            $lineNumber = $exception.InvocationInfo.ScriptLineNumber
             $message = "Caught excecption in migration job on line '$lineNumber':`n$exceptionMessage"
-            Write-Log -severityLevel Error -logMessage $message -skipConsole
+            try {
+                Write-Log -severityLevel Error -logMessage $message -skipConsole
+            } catch {
+                Write-Host "Failed before or during import of VAMT Module."
+            }
             Write-Error $message
             try { Disconnect-VIServer * -Confirm:$false } catch {}
-            throw $_
+            throw $exception
         }
     } -ArgumentList($srcViConn,$tgtViConn,$vm,$compute,$network,$vmfolder,$storage,$retry,$test,$scriptVars)
     #Debug-Job -Job $migrationJob
@@ -2277,13 +2282,18 @@ function Start-RollbackVMJob {
                 result = "Successfully rolled back VM '$($vm.Name)'."
             }
         } catch {
-            $exceptionMessage = $_.Exception.Message
-            $lineNumber = $_.InvocationInfo.ScriptLineNumber
+            $exception = $_
+            $exceptionMessage = $exception.Exception.Message
+            $lineNumber = $exception.InvocationInfo.ScriptLineNumber
             $message = "Caught excecption in rollback job on line '$lineNumber':`n$exceptionMessage"
-            Write-Log -severityLevel Error -logMessage $message -skipConsole
+            try {
+                Write-Log -severityLevel Error -logMessage $message -skipConsole
+            } catch {
+                Write-Host "Failed before or during import of VAMT Module."
+            }
             Write-Error $message
             try { Disconnect-VIServer * -Confirm:$false } catch {}
-            throw $_
+            throw $exception
         }
     } -ArgumentList($srcViConn,$tgtViConn,$vm,$vmhost,$respool,$network,$vmfolder,$datastore,$snapshot,$retry,$test,$scriptVars)
 
@@ -2367,13 +2377,18 @@ function Start-CleanupVMJob {
                 result = "Successfully cleaned up VM '$($vm.Name)'."
             }
         } catch {
-            $exceptionMessage = $_.Exception.Message
-            $lineNumber = $_.InvocationInfo.ScriptLineNumber
+            $exception = $_
+            $exceptionMessage = $exception.Exception.Message
+            $lineNumber = $exception.InvocationInfo.ScriptLineNumber
             $message = "Caught excecption in cleanup job on line '$lineNumber':`n$exceptionMessage"
-            Write-Log -severityLevel Error -logMessage $message -skipConsole
+            try {
+                Write-Log -severityLevel Error -logMessage $message -skipConsole
+            } catch {
+                Write-Host "Failed before or during import of VAMT Module."
+            }
             Write-Error $message
             try { Disconnect-VIServer * -Confirm:$false } catch {}
-            throw $_
+            throw $exception
         }
     } -ArgumentList($viConn,$vm,$snapshot,$test,$scriptVars)
 

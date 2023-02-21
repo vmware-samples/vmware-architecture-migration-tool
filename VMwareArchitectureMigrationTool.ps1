@@ -471,7 +471,8 @@ if ($action -in @("migrate","rollback")) {
                     }
                 } elseif ($job.State -eq $jobFailed) {
                     Write-Log -severityLevel Error "VM move job for '$($_.tgt_vm.Name)' failed with errors:`n$($job.Error.Exception.Message -join "`n")"
-                    if (!!$job.Error -and ($job.Error.ToString() -match $retryErrors)) {
+                    Write-Log -severityLevel Error -logMessage "Failed Job Details:`n$($job | ConvertTo-Json -Depth 4)" -skipConsole -logFileNamePrefix $_.tgt_vm.Name -syslogServer ''
+                    if (!$job.Error -or ($job.Error.ToString() -match $retryErrors)) {
                         if ($_.attempts -lt $jobRetries) {
                             Write-Log -severityLevel Warn -logMessage "Error is eligible to be re-tried. Setting retry status to try again later for '$($_.tgt_vm.Name)'."
                             $_.job_state = "failed_pendingRetry"
@@ -488,6 +489,7 @@ if ($action -in @("migrate","rollback")) {
                     Write-Log -severityLevel Info "VM move job for '$($_.tgt_vm.Name)' is still preparing to run."
                 } else {
                     Write-Log -severityLevel Error  "VM move job for '$($_.tgt_vm.Name)' ended with unsupported state $($job.State). Considering this job failed."
+                    Write-Log -severityLevel Error -logMessage "Unkown Job State Details:`n$($job | ConvertTo-Json -Depth 4)" -skipConsole -logFileNamePrefix $_.tgt_vm.Name -syslogServer ''
                     $_.job_state = $jobFailed
                     $_.tag_state = Set-VMStateTag -vm $_.tgt_vm -tagName $vamtTagDetails.failedTagName -stateTagsCatName $vamtTagDetails.tagCatName -WhatIf:(!!$WhatIf) -viConn $viConnections
                 }
@@ -600,7 +602,8 @@ if ($action -in @("migrate","rollback")) {
                     }
                 } elseif ($job.State -eq $jobFailed) {
                     Write-Log -severityLevel Error "VM cleanup job for '$($_.clean_vm.Name)' failed with errors:`n$($job.Error.Exception.Message -join "`n")"
-                    if ($job.Error.ToString() -match $retryErrors) {
+                    Write-Log -severityLevel Error -logMessage "Failed Job Details:`n$($job | ConvertTo-Json -Depth 4)" -skipConsole -logFileNamePrefix $_.tgt_vm.Name -syslogServer ''
+                    if (!$job.Error -or ($job.Error.ToString() -match $retryErrors)) {
                         if ($_.attempts -lt $jobRetries) {
                             Write-Log -severityLevel Warn -logMessage "Error is eligible to be re-tried. Setting retry status to try again later for '$($_.clean_vm.Name)'."
                             $_.job_state = "failed_pendingRetry"
@@ -617,6 +620,7 @@ if ($action -in @("migrate","rollback")) {
                     Write-Log -severityLevel Info "VM cleanup job for '$($_.clean_vm.Name)' is still preparing to run."
                 } else {
                     Write-Log -severityLevel Error  "VM cleanup job for '$($_.clean_vm.Name)' ended with unsupported state $($job.State). Considering this job failed."
+                    Write-Log -severityLevel Error -logMessage "Unkown Job State Details:`n$($job | ConvertTo-Json -Depth 4)" -skipConsole -logFileNamePrefix $_.clean_vm.Name -syslogServer ''
                     $_.job_state = $jobFailed
                     $_.tag_state = Get-VMStateBasedOnTag -vm $_.clean_vm -viConn $viConnections -stateTagsCatName $vamtTagDetails.tagCatName
                 }

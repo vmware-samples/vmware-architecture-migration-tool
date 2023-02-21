@@ -5,7 +5,7 @@
   * [action](#action)
   * [inputFilePath](#inputfilepath)
   * [vCenters](#vcenters)
-  * [vcCredential](#vccredential)
+  * [vcCredentials](#vcCredentials)
   * [changeWindowStart](#changewindowstart)
   * [changeWindowDuration](#changewindowduration)
   * [parallelTaskCount](#paralleltaskcount)
@@ -41,7 +41,7 @@ Allowed values    | migrate, rollback, cleanup
 ```
 
 ## inputFilePath
-Full path to the inputs CSV file.
+Full path to the input file. This can be a csv file or a json file. See examples: [toMigrate.csv](../example/toMigrate.csv) & [toMigrate.json](../example/toMigrate.json).
 ```
 Input type        | String
 Required          | true
@@ -56,12 +56,16 @@ Required          | true
 Example values    | "vcenter01.corp.local" OR @("vcenter01.corp.local","vcenter02.corp.local")
 ```
 
-## vcCredential
-If not set, a lookup will occur to find the credential stored locally. If not found, the user will be prompted for a credential and that credential will be stored (encrypted) on the filesystem for future retrieval. This credential will be used for all [vCenters](#vcenters) that are specified AND will overwrite any credential currently stored for the specified vCenters.
+## vcCredentials
+This parameter should either be a single PSCredential object to be used to connect to all specified [vCenters](#vcenters), OR an ordered array of PSCredential objects where the length matches the specified vCenters list and each element in this vcCredentials array will be used to authenticate to the corresponding element in the [vCenters](#vcenters) array.
+
+When this parameter is used, it will overwrite any credential currently stored for the specified vCenters.
+
+If not set, a lookup will occur to find the credential(s) for each [vCenters](#vcenters) element stored locally. If not found, the user will be prompted for a credential and that credential will be stored (encrypted) on the filesystem for future retrieval. 
 ```
-Input type        | PSCredential
+Input type        | PSCredential[]
 Required          | false
-Example values    | (Get-Credential -Message "Enter vCenter creds")
+Example values    | @((Get-Credential -Message "Enter vc01 creds"),(Get-Credential -Message "Enter vc02 creds"))
 ```
 
 ## changeWindowStart

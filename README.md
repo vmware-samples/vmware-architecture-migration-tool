@@ -34,12 +34,10 @@ The **V**Mware **A**rchitecture **M**igration **T**ool (VAMT) is designed to pro
 Below is a list of known limitations. This by no means can be a complete list as there may be limitations that have not been considered.  Many of these limitations are a result of focusing on the 80% of use cases to the exclusion of the 20%, aka 80/20 rule.
 
 - Designed to be executed from Windows only.
-- When migrating a machine with more than one network card, only the first network card will be connected. The user will need to connect the other NICs post migration.
-- Migrating a machine on multiple datastores will result in the VM being moved to one datastore.
-- Rollback of a machine from multiple datastores will result in it being moved back to one datastore on the original location.
-    - Rollback process will only send VM back to its original ESXi host, resource pool, first datastore, first network - not supporting cluster for rollback allows the widest array of supported scenarios. If rollback target needs to be modified, it can be updated in the VM properties/attributes.    
+- Rollback process will send VM back to its original vCenter, ESXi host, resource pool, datastore(s), and network(s). Not supporting cluster for rollback allows the widest array of supported scenarios. If rollback target needs to be modified, it can be updated in the VM properties/attributes.    
 - Migrations will start up until the end of the change window and run until complete, possibly past the defined window.
-- Cold migrations initiated by this script are constrained by the limitations and requirements of vSphere.
+- Cold migrations initiated by this script are constrained by the limitations and requirements of vSphere & PowerCLI.
+    - For example, PowerCLI cannot (as of v13.0) initiate a migration from vSphere 8 to vSphere 7. However, migrating from vSphere 7 to vSphere 8 is possible, so please keep in mind that if your environment requires this scenario, you won't be able to use this tool to rollback your VM(s).
 
 ## Design
 
