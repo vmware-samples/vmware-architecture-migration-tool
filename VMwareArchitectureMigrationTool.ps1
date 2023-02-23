@@ -680,7 +680,7 @@ if ($action -in @("migrate","rollback")) {
 
 $currentTime = Get-Date
 $finalMessage = "Script run summary:`n`tScript start: '$vamtScriptLaunchTime'"
-$finalMessage += "`n`tScript runtime: $(($currentTime - $vamtScriptLaunchTime).Minutes) minutes"
+$finalMessage += "`n`tScript runtime: $([math]::Round(($currentTime - $vamtScriptLaunchTime).TotalMinutes)) minutes"
 $finalMessage += "`n`tScript completion: '$currentTime'"
 $finalMessage += "`n`tTotal VM targets in migration run: $($finalObj.count)"
 $notAttemptedCount = 0
