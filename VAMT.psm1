@@ -282,12 +282,12 @@ function Invoke-Move {
         } else {
             throw "Credential property inside the specified VI Connection was null. This function should only be used with VI Connections created by VAMT\Initialize-VIServer."
         }
+        #$cert = Get-VIMachineCertificate -Server $Server -VCenterOnly | ?{ $_.Subject -eq $Server.ServiceUri.Host }
+        #$spec.Service.SslThumbprint = ($cert.Certificate.Thumbprint -split '(..)' -ne '') -join ":"
+        $spec.Service.SslThumbprint = Get-SSLThumbprint -URL $Server.ServiceUri.AbsoluteUri
+        $spec.Service.InstanceUuid = $Server.InstanceUuid
+        $spec.Service.Url = $Server.ServiceUri.AbsoluteUri
     }
-    #$cert = Get-VIMachineCertificate -Server $Server -VCenterOnly | ?{ $_.Subject -eq $Server.ServiceUri.Host }
-    #$spec.Service.SslThumbprint = ($cert.Certificate.Thumbprint -split '(..)' -ne '') -join ":"
-    $spec.Service.SslThumbprint = Get-SSLThumbprint -URL $Server.ServiceUri.AbsoluteUri
-    $spec.Service.InstanceUuid = $Server.InstanceUuid
-    $spec.Service.Url = $Server.ServiceUri.AbsoluteUri
     $printSpec = $spec | ConvertTo-Json -Depth 10 | ConvertFrom-Json
     if (!!$spec.Service.Credential.Password) {
         $printSpec.Service.Credential.Password = "***********"
@@ -861,6 +861,7 @@ function Get-VIObjectByObject {
     }
     return $obj
 }
+
 function Test-VMTools {
     param (
         [Parameter(Mandatory)]
