@@ -63,6 +63,15 @@ param(
     [Parameter()] <# number of retries that should be attempted if the VM has active vCenter Tasks preventing the migration #>
     [Int]$jobRetries = 5,
 
+    [Parameter()] <# Amount of time in seconds to wait when shutting down a guest os before we time out #>
+    [Int]$osShutdownTimeout = 600,
+
+    [Parameter()] <# Amount of time in seconds to wait for VMtools to start when powering on a VM post migration #>
+    [Int]$osPowerOnTimeout = 900,
+
+    [Parameter()] <# Amount of time in seconds between job status refreshes #>
+    [Int]$statusRefreshInterval = 15,
+
     [Parameter()] <# ip/fqdn:port - port optional #>
     [ValidateNotNullOrEmpty()]
     [String]$syslogHost,
@@ -200,8 +209,8 @@ $Script:vamtVcAttrDetails = @{
     snapshotNameAttribute = "vamtSnapshotName"
 }
 #job variables
-$Script:vamtOsShutdownTimeout = 600 #seconds
-$Script:vamtOsPowerOnTimeout = 900 #seconds
+$Script:vamtOsShutdownTimeout = $osShutdownTimeout
+$Script:vamtOsPowerOnTimeout = $osPowerOnTimeout
 $Script:vamtForceShutdown = (!!$forcePowerOff -or !!$ignoreVmTools)
 $Script:vamtPowerOnIfRollback = !!$powerOnIfRollback
 $Script:vamtIgnoreVmTools = !!$ignoreVmTools
@@ -219,7 +228,7 @@ $jobFailed = "Failed"
 $jobFailedExternal = "$jobFailed-External"
 $jobRolledBack = "rolledBack"
 $jobRolledBackExternal = "$jobRolledBack-External"
-$jobControllerRefreshInterval = 15 #seconds
+$jobControllerRefreshInterval = $statusRefreshInterval
 $jobStates = @{
     completeExternal = $jobCompleteExternal
     completeWithErrorsExternal = $jobCompleteWithErrorsExternal
