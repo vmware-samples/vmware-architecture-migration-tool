@@ -739,8 +739,15 @@ function Get-VMStateBasedOnTag {
 
         [Parameter(Mandatory)]
         [ValidateNotNullOrEmpty()]
-        [String]$stateTagsCatName
+        [String]$stateTagsCatName,
+
+        [Parameter()]
+        [Switch]$ignoreTags
     )
+
+    if (!!$ignoreTags) {
+        return "Unknown(Skipped)"
+    }
 
     $vm = get-vm $vm -Server $viConn
     $tagAssignment = Get-TagAssignment -Entity $vm -Category $stateTagsCatName -Server $viConn
@@ -775,8 +782,15 @@ function Set-VMStateTag {
 
         [Parameter(Mandatory)]
         [ValidateNotNullOrEmpty()]
-        [VMware.VimAutomation.ViCore.Impl.V1.VIServerImpl[]]$viConn
+        [VMware.VimAutomation.ViCore.Impl.V1.VIServerImpl[]]$viConn,
+
+        [Parameter()]
+        [Switch]$ignoreTags
     )
+
+    if (!!$ignoreTags) {
+        return "Unknown(Skipped)"
+    }
 
     $logParameters = @{
         skipConsole = $false
@@ -1075,7 +1089,10 @@ function Confirm-MigrationTargets {
         [String[]]$doNotRunStates,
 
         [Parameter()]
-        [Switch]$ignoreVmTools
+        [Switch]$ignoreVmTools,
+
+        [Parameter()]
+        [Switch]$ignoreTags
     )
     #Check that all VMs and target locations listed in input file are valid
     $targetVcNames = $inputs."$($inputHeaders.vcenter)".ToLower() | Select-Object -Unique
@@ -1224,7 +1241,7 @@ function Confirm-MigrationTargets {
         }
 
         $validationErrors = @()
-        $vmState = Get-VMStateBasedOnTag -vm $vmObj -viConn $srcViConn -stateTagsCatName $tagDetails.tagCatName
+        $vmState = Get-VMStateBasedOnTag -vm $vmObj -viConn $srcViConn -stateTagsCatName $tagDetails.tagCatName -ignoreTags:(!!$ignoreTags)
         $jobState = $vmState
         $job = $null
         $eligibleToRun = $false
@@ -1339,7 +1356,10 @@ function Confirm-RollbackTargets {
         [String[]]$doNotRunStates,
 
         [Parameter()]
-        [Switch]$ignoreVmTools
+        [Switch]$ignoreVmTools,
+
+        [Parameter()]
+        [Switch]$ignoreTags
     )
 
     #Check that all VMs listed in input file are valid
@@ -1430,7 +1450,7 @@ function Confirm-RollbackTargets {
         $srcViConn = $viConnections | Where-Object {$_.Id -eq ($vm.Uid -Split 'VirtualMachine' | Select-Object -First 1)}
         $tgtViConn = $viConnections | Where-Object {$_.Name -eq $target.tgt_vc}
         $validationErrors = @()
-        $vmState = Get-VMStateBasedOnTag -vm $vm -viConn $srcViConn -stateTagsCatName $tagDetails.tagCatName
+        $vmState = Get-VMStateBasedOnTag -vm $vm -viConn $srcViConn -stateTagsCatName $tagDetails.tagCatName -ignoreTags:(!!$ignoreTags)
         $jobState = $vmState
         $job = $null
         $eligibleToRun = $false
@@ -1599,7 +1619,10 @@ function Confirm-CleanupTargets {
 
         [Parameter(Mandatory)]
         [ValidateNotNullOrEmpty()]
-        [String]$readyState
+        [String]$readyState,
+
+        [Parameter()]
+        [Switch]$ignoreTags
     )
     #Check that all VMs listed in input file are valid
     $vmValidationResult = Confirm-VMs -vmNames $inputs."$($inputHeaders.name)" -viConnection $viConnections
@@ -1620,7 +1643,6 @@ function Confirm-CleanupTargets {
         $emptyAttrError = "VM attribute '{0}' is not set on VM '$vmName'."
         try {
             $rollbackSnapshotName = Confirm-NotNullOrEmpty -inString $vmObj.CustomFields.Item($snapshotAttrName) -failMessage ($emptyAttrError -f $snapshotAttrName)
-            $status = $readyState
         } catch {
             $missingMessage = "The snapshot attribute on vm '$vmName' was not populated. Will not attempt to cleanup any snaps."
             Write-Log -severityLevel Warn -logMessage $missingMessage
@@ -1654,7 +1676,7 @@ function Confirm-CleanupTargets {
             Write-Log -severityLevel Error -logMessage ($notFoundError -f $rollbackSnapshotName)
         }
 
-        $vmState = Get-VMStateBasedOnTag -vm $vm -viConn $viConn -stateTagsCatName $tagDetails.tagCatName
+        $vmState = Get-VMStateBasedOnTag -vm $vm -viConn $viConn -stateTagsCatName $tagDetails.tagCatName -ignoreTags:(!!$ignoreTags)
 
         [PSCustomObject]@{
             clean_vm = $vm
@@ -1767,15 +1789,18 @@ function Start-MigrateVMJob {
             Write-Log -logDefaults $PSDefaultParameterValues -severityLevel Info -logMessage ("Starting {0}migration process on '$($vm.Name)'." -f $retryMessage)
 
             #validate no-one is stepping on our job
-            $currentState = Get-VMStateBasedOnTag -vm $vm -viConn $srcViConn -stateTagsCatName $vamtTagDetails.tagCatName
+            $currentState = Get-VMStateBasedOnTag -vm $vm -viConn $srcViConn -stateTagsCatName $vamtTagDetails.tagCatName -ignoreTags:$vamtIgnoreTags
             $allowedStates = @($vamtTagDetails.readyTagName)
             if ($isRetry) {
                 $allowedStates += $vamtTagDetails.inProgressTagName
             }
+            if ($vamtIgnoreTags) {
+                $allowedStates += "Unknown(Skipped)"
+            }
             if ($currentState -in $allowedStates) {
                 #change tag to in progress
                 $null = Confirm-ActiveTasks -vm $vm -viConnection $srcViConn -waitTasks -WhatIf:$WhatIf
-                $null = Set-VMStateTag -vm $vm -tagName $vamtTagDetails.inProgressTagName -stateTagsCatName $vamtTagDetails.tagCatName -WhatIf:$WhatIf -viConn $srcViConn
+                $null = Set-VMStateTag -vm $vm -tagName $vamtTagDetails.inProgressTagName -stateTagsCatName $vamtTagDetails.tagCatName -WhatIf:$WhatIf -viConn $srcViConn -ignoreTags:$vamtIgnoreTags
             } else {
                 throw "Detected invalid tag state '$currentState' on '$vmName'. This is likely the result of a concurent job running on the VM elsewhere."
             }
@@ -2003,7 +2028,7 @@ function Start-MigrateVMJob {
 
             #change tag to complete
             $null = Confirm-ActiveTasks -vm $vm -viConnection $tgtViConn -waitTasks -WhatIf:$WhatIf
-            $null = Set-VMStateTag -vm $vm -tagName $vamtTagDetails.completeTagName -stateTagsCatName $vamtTagDetails.tagCatName -WhatIf:$WhatIf -viConn $tgtViConn
+            $null = Set-VMStateTag -vm $vm -tagName $vamtTagDetails.completeTagName -stateTagsCatName $vamtTagDetails.tagCatName -WhatIf:$WhatIf -viConn $tgtViConn -ignoreTags:$vamtIgnoreTags
 
             Write-Log -severityLevel Info -logMessage "Migration of '$($vm.Name)' completed successfully."
             try { Disconnect-VIServer * -Confirm:$false } catch {}
@@ -2133,7 +2158,7 @@ function Start-RollbackVMJob {
             if ($currentState -in $allowedStates) {
                 #change tag to in progress
                 $null = Confirm-ActiveTasks -vm $vm -viConnection $srcViConn -waitTasks -WhatIf:$WhatIf
-                $null = Set-VMStateTag -vm $vm -tagName $vamtTagDetails.inProgressTagName -stateTagsCatName $vamtTagDetails.tagCatName -WhatIf:$WhatIf -viConn $srcViConn
+                $null = Set-VMStateTag -vm $vm -tagName $vamtTagDetails.inProgressTagName -stateTagsCatName $vamtTagDetails.tagCatName -WhatIf:$WhatIf -viConn $srcViConn -ignoreTags:$vamtIgnoreTags
             } else {
                 throw "Detected invalid tag state '$currentState' on '$vmName'. This is likely the result of a concurent job running on the VM elsewhere."
             }
@@ -2274,7 +2299,7 @@ function Start-RollbackVMJob {
 
             #change tag to complete
             $null = Confirm-ActiveTasks -vm $vm -viConnection $tgtViConn -waitTasks -WhatIf:$WhatIf
-            $null = Set-VMStateTag -vm $vm -tagName $vamtTagDetails.rollbackTagName -stateTagsCatName $vamtTagDetails.tagCatName -WhatIf:$WhatIf -viConn $tgtViConn
+            $null = Set-VMStateTag -vm $vm -tagName $vamtTagDetails.rollbackTagName -stateTagsCatName $vamtTagDetails.tagCatName -WhatIf:$WhatIf -viConn $tgtViConn -ignoreTags:$vamtIgnoreTags
 
             Write-Log -severityLevel Info -logMessage "Rollback of '$($vm.Name)' completed successfully."
             try { Disconnect-VIServer * -Confirm:$false } catch {}
@@ -2364,11 +2389,13 @@ function Start-CleanupVMJob {
             }
 
             #Remove VAMT Tag
-            Write-Log -severityLevel Info -logMessage "Looking for VAMT tags on '$($vm.Name)'."
-            $tagAssignments = Get-TagAssignment -Category $vamtTagDetails.tagCatName -Entity $vm -Server $viConn
-            if ($tagAssignments.count -gt 0) {
-                Write-Log -severityLevel Info -logMessage "Removing VAMT tag from '$($vm.Name)'."
-                Remove-TagAssignment -TagAssignment $tagAssignments -Confirm:$false -WhatIf:$WhatIf
+            if (!$vamtIgnoreTags) {
+                Write-Log -severityLevel Info -logMessage "Looking for VAMT tags on '$($vm.Name)'."
+                $tagAssignments = Get-TagAssignment -Category $vamtTagDetails.tagCatName -Entity $vm -Server $viConn
+                if ($tagAssignments.count -gt 0) {
+                    Write-Log -severityLevel Info -logMessage "Removing VAMT tag from '$($vm.Name)'."
+                    Remove-TagAssignment -TagAssignment $tagAssignments -Confirm:$false -WhatIf:$WhatIf
+                }
             }
 
             Write-Log -severityLevel Info -logMessage "Cleanup of '$($vm.Name)' completed successfully."
