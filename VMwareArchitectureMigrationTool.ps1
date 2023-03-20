@@ -700,7 +700,9 @@ $currentTime = Get-Date
 $finalMessage = "Script run summary:`n`tScript start: '$vamtScriptLaunchTime'"
 $finalMessage += "`n`tScript runtime: $([math]::Round(($currentTime - $vamtScriptLaunchTime).TotalMinutes)) minutes"
 $finalMessage += "`n`tScript completion: '$currentTime'"
-$finalMessage += "`n`tTotal VM targets in migration run: $($finalObj.count)"
+$finalMessage += "`n`tTotal VM targets in migration run: $($finalObj.Count)"
+$vmMultiAttemptCount = ($finalObj | Where-Object { $_.attempts -gt 1}).Count
+$finalMessage += "`n`tTotal VM jobs with retry attempts: $vmMultiAttemptCount"
 $notAttemptedCount = 0
 $finalObj.job_state | Select-Object -Unique | ForEach-Object {
     $state = $_
