@@ -1264,6 +1264,9 @@ function Confirm-MigrationTargets {
         } elseif ($jobState -eq "notag") {
             $jobState = $jobStates.jobNotRun
             $validationErrors += ($notAttempted -f $jobState)
+        } elseif ($jobState -eq $tagDetails.ignored) {
+            $jobState = $tagDetails.readyTagName
+            $eligibleToRun = $true
         } else {
             $eligibleToRun = $true
         }
@@ -1473,6 +1476,9 @@ function Confirm-RollbackTargets {
         } elseif ($jobState -eq "notag" -or !$target.tgt_attrs_valid) {
             $jobState = $jobStates.jobNotRun
             $validationErrors += ($notAttempted -f $jobState)
+        } elseif ($jobState -eq $tagDetails.ignored) {
+            $jobState = $tagDetails.readyToRollbackTagName
+            $eligibleToRun = $true
         } else {
             $eligibleToRun = $true
         }
@@ -1795,7 +1801,7 @@ function Start-MigrateVMJob {
                 $allowedStates += $vamtTagDetails.inProgressTagName
             }
             if ($vamtIgnoreTags) {
-                $allowedStates += "Unknown(Skipped)"
+                $allowedStates += $vamtTagDetails.ignored
             }
             if ($currentState -in $allowedStates) {
                 #change tag to in progress
@@ -2150,10 +2156,13 @@ function Start-RollbackVMJob {
             Write-Log -severityLevel Info -logMessage ("Starting {0}rollback process on '$vmName'." -f $retryMessage)
 
             #validate no-one is stepping on our job
-            $currentState = Get-VMStateBasedOnTag -vm $vm -viConn $srcViConn -stateTagsCatName $vamtTagDetails.tagCatName
+            $currentState = Get-VMStateBasedOnTag -vm $vm -viConn $srcViConn -stateTagsCatName $vamtTagDetails.tagCatName -ignoreTags:$vamtIgnoreTags
             $allowedStates = @($vamtTagDetails.readyToRollbackTagName)
             if ($isRetry) {
                 $allowedStates += $vamtTagDetails.inProgressTagName
+            }
+            if ($vamtIgnoreTags) {
+                $allowedStates += $vamtTagDetails.ignored
             }
             if ($currentState -in $allowedStates) {
                 #change tag to in progress

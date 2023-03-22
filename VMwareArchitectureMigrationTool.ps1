@@ -195,6 +195,7 @@ $Script:vamtTagDetails = @{
     failedTagName = "failed"
     readyToRollbackTagName = "readyToRollback"
     rollbackTagName = "rolledBack"
+    ignored = "Unknown(Skipped)"
 }
 
 #rollback & auditing VM attributes
