@@ -261,7 +261,10 @@ if ($action -eq "migrate") {
 $retryErrors = @(
     "Object reference not set to an instance of an object.",
     "has already been deleted or has not been completely created",
-    "Invalid configuration for device"
+    "Invalid configuration for device",
+    "Could not complete network copy for file",
+    "There was no endpoint listening at",
+    "Could not find any of the objects specified by name"
 ) -join '|'
 
 #cleanup variables
