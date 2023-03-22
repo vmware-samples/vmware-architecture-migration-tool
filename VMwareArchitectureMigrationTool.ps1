@@ -264,7 +264,8 @@ $retryErrors = @(
     "Invalid configuration for device",
     "Could not complete network copy for file",
     "There was no endpoint listening at",
-    "Could not find any of the objects specified by name"
+    "Could not find any of the objects specified by name",
+    "Detected invalid tag state ''"
 ) -join '|'
 
 #cleanup variables
