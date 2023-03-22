@@ -366,7 +366,7 @@ if ($errorLines.Length -gt 0) {
 $vmnames = $inputs.vmname | Select-Object -Unique
 $duplicates = Compare-object -referenceobject $inputs.vmname -differenceobject $vmnames
 if ($duplicates.InputObject.Length -gt 0) {
-    $message = "The following VM names were found more than once ($(($duplicates.InputObject | Sort-Object | Get-Unique) -join ', ')) in the inputs CSV file."
+    $message = "The following VM names were found more than once ($(($duplicates.InputObject | Sort-Object | Get-Unique) -join ', ')) in the inputs file."
     Write-Log -severityLevel Error -logMessage $message
     throw $message
 }
