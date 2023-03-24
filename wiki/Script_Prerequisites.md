@@ -13,7 +13,7 @@
 
 # Prerequisites
 
-In order to execute the VAMT there are several prerequisite requirements. These requirements are outlined in the sections below.
+In order to execute the VAMT, there are several prerequisite requirements. These requirements are outlined in the sections below.
 
 ### PowerShell
 
@@ -27,14 +27,14 @@ This project has been built leveraging the following components:
 * Microsoft Windows 10
 > **Note**
 >
-> The aforementioned operating systems have been confirmed but any os with Windows PowerShell 5.1 should suffice.
+> The aforementioned operating systems have been confirmed, but any OS with Windows PowerShell 5.1 should suffice.
 
 ### Platform
 
 * VMware vSphere 7.0+
 > **Note**
 >
-> The aforementioned version(s) have been confirmed but earlier versions may also be compatible.
+> The aforementioned version(s) have been confirmed, but earlier versions may also be compatible.
 
 ### Access
 
@@ -43,9 +43,9 @@ This project has been built leveraging the following components:
 
 ### Connectivity
 
-* Ability to connect to your vCenter Server from your Windows OS via PowerCLI. 
+* Ability to connect to your vCenter Server from your Windows OS using PowerCLI.
     * See: [Connect to a vCenter Server System](https://developer.vmware.com/docs/15315/powercli-user-s-guide/GUID-1FE80126-ADE6-45AC-A568-AA6CD849DA81.html)
-* Ability to connect to your SMTP server from your Windows OS via PowerShell*
+* Ability to connect to your SMTP server from your Windows OS using PowerShell*
     * See: [Send-MailMessage](https://docs.microsoft.com/en-us/powershell/module/microsoft.powershell.utility/send-mailmessage?view=powershell-5.1)
 * Ability to send syslog traffic to your syslog collector from your Windows OS*
 > **Note**
@@ -55,7 +55,7 @@ This project has been built leveraging the following components:
 
 # Setup
 
-In order to execute the VAMT there are configuration steps required in vCenter as outlined below.
+In order to execute the VAMT, there are configuration steps required in vCenter as outlined below.
 
 ## vCenter Tags
 

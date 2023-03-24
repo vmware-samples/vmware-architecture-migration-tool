@@ -10,6 +10,9 @@
   * [changeWindowDuration](#changewindowduration)
   * [parallelTaskCount](#paralleltaskcount)
   * [jobRetries](#jobretries)
+  * [statusRefreshInterval](#statusrefreshinterval)
+  * [osShutdownTimeout](#osshutdowntimeout)
+  * [osPowerOnTimeout](#ospowerontimeout)
   * [syslogHost](#sysloghost)
   * [smtpServer](#smtpserver)
   * [toEmail](#toemail)
@@ -17,8 +20,8 @@
   * [secureMailCred](#securemailcred)
   * [useMailCred](#usemailcred)
   * [smtpUseSsl](#smtpusessl)
-  * [smtpUseSsl](#smtpusessl-1)
   * [ignoreVmTools](#ignorevmtools)
+  * [ignoreTags](#ignoretags)
   * [forcePowerOff](#forcepoweroff)
   * [powerOnIfRollback](#poweronifrollback)
   * [debugLogging](#debuglogging)
@@ -105,6 +108,28 @@ Required          | false
 Default value     | 5
 ```
 
+## statusRefreshInterval
+Amount of time between polls of the main job queue loop. This can be tuned for more or less frequent updates. At scale, a lower value could speed up total execution time since there will be less waiting between checks, however this will come at the expense of increased demand on the script host and increased noise in the logs.
+```
+Input type        | Int32
+Required          | false
+Default value     | 15
+```
+## osShutdownTimeout
+Amount of time in seconds to wait when shutting down a guest os before we time out. A timeout will result in a failed migration/rollback job.
+```
+Input type        | Int32
+Required          | false
+Default value     | 600
+```
+## osPowerOnTimeout
+Amount of time in seconds to wait for VMtools to start when powering on a VM post migration. A timeout will result in a failed migration/rollback job.
+```
+Input type        | Int32
+Required          | false
+Default value     | 900
+```
+
 ## syslogHost
 Syslog host that all logs from the script execution will be forwarded to. The format is `ip/fqdn:port` where `port` is optional.
 ```
@@ -137,8 +162,7 @@ Email address that the final report of the script execution will be sent from.
 ```
 Input type        | String
 Required          | Only if SMTP server is specified.
-Example value     | log.corp.local OR 192.168.10.50:514
-Default Port      | 25
+Example value     | jack@corp.local
 ```
 
 ## secureMailCred
@@ -163,15 +187,15 @@ Input type        | Switch
 Required          | false
 ```
 
-## smtpUseSsl
-Switch that will enable secure smtp. 
+## ignoreVmTools
+Switch that will cause the script to ignore the pre and post migration VM tools state when a migration [action](#action) is specified. If not selected, the script will only start the migration IF VMware tools is running and will only successfully complete IF VMware tools is running after the migration completes.
 ```
 Input type        | Switch
 Required          | false
 ```
 
-## ignoreVmTools
-Switch that will cause the script to ignore the pre and post migration VM tools state when a migration [action](#action) is specified. If not selected, the script will only start the migration IF VMware tools is running and will only successfully complete IF VMware tools is running after the migration completes.
+## ignoreTags
+Switch that will cause the script to ignore the [tag validation](./Script_Prerequisites.md#vcenter-tags) that occurs on each VM before each migration [action](#action) job. 
 ```
 Input type        | Switch
 Required          | false

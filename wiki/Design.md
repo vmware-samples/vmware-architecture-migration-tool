@@ -15,8 +15,7 @@ The following list of statements define the guidelines used to develop the tool 
 - The tool should consist of support documentation and only one file to execute.
 - Minimal libraries are required to execute the tool.
 - Operate on the VMs as safely as possible while also maintaining the UUID.
-- Best effort to provide performance without being overly complex. 
-- Focus on what is believed to be most used use cases, aka the 80/20 rule. 
+- Best effort to provide performance without being overly complex.
 - Maintain the state of the migrated VM with vSphere.
 - Utilize a common and easy input file format.
 

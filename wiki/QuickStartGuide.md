@@ -1,6 +1,7 @@
-# VMware Architecture Migration Tool (VAMT)<br>Quick Start Guide (with examples)
+# VMware Architecture Migration Tool (VAMT)
+# Quick Start Guide (with examples)
 ---
-The VMWare Architecture Migration Tool (VAMT) is a PowerShell script that uses VMWare PowerCLI to enable moving a VM from one hardware architecture (for instance Intel) to a different hardware architecture (for instance AMD).
+The VMware Architecture Migration Tool (VAMT) is a PowerShell script that uses VMware PowerCLI to enable moving a VM from one hardware architecture (for example, Intel) to a different hardware architecture (for example, AMD).
 
 There are some constraints and guidelines for this VM movement that are outlined in the full [Script User's Guide](./Script_Usage.md). The User's Guide covers more of the functional details for the runtime usage of the script and should be referred to for more thorough documentation. This Quick Start guide is intended to be a cheat sheet showing an example of the script usage that was captured during initial testing.
 
@@ -66,7 +67,7 @@ Sample screen shots:
 <b>NOTES:
 - Much of this setup can be automated once the user is familiar with the environment. There are example PowerShell/PowerCLI scripts in the vamt_dir repo that can be used for enabling this automation.
 
-- The first time the script is ran in a PS session you may see warnings that look like the following. These are from PowerCLI and can be safely ignored.</b><br>
+- The first time the script is run in a PowerShell session you may see warnings that look like the following. These are from PowerCLI and can be safely ignored.</b><br>
 *Example warnings that may be seen:*
 ```
 WARNING: The 'Version' property of VirtualMachine type is deprecated. Use the 'HardwareVersion' property instead.
@@ -97,7 +98,7 @@ Receiving objects: 100% (260/260), 2.74 MiB | 8.14 MiB/s, done.
 Resolving deltas: 100% (128/128), done.
 ```
 
-## 2) Set up desired onetime session settings for migration and interaction with VMware PowerCLI
+## 2) Set up desired one-time session settings for migration and interaction with VMware PowerCLI
 ```
 Set-PowerCLIConfiguration -Scope User -ParticipateInCeip $true -InvalidCertificateAction Ignore
 Set-PowerCLIConfiguration -DisplayDeprecationWarnings:$false -Scope User
@@ -280,7 +281,7 @@ And as an additional validation, you can examine the final state of each VM. You
 ![Verify state of VMs](./images/VAMT-MigrateVMs_6.jpg)
 
 # Rollback
-VMs can be rolled back from the migrated cluster at any point in time after a migration operation is complete. Rollback basically can be thought of as a reverse migration, going from the target cluster that the VM was migrated to back to the original cluster it started in.
+VMs can be rolled back to the original cluster at any point after a migration operation is complete. Rollback basically can be thought of as a reverse migration, going from the target cluster that the VM was migrated to back to the original cluster it started in.
 
 Once a migration has been completed, there is information stored in the custom attributes along with a snapshot that was taken for that VM:
 ![Rollback snapshot](./images/VAMT-RollbackVMs_1.jpg)
