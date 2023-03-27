@@ -3,7 +3,7 @@
 ## Getting Started
 
 Visit our [QuickStart guide](./wiki/QuickStartGuide.md) and explore
-our [Table of Contents](#table-of-contents) below to review the projects documentation. 
+our [Table of Contents](#table-of-contents) below to review the project's documentation. 
 
 ## Table of Contents
 
@@ -18,7 +18,7 @@ our [Table of Contents](#table-of-contents) below to review the projects documen
 
 ## Purpose 
 
-The **V**Mware **A**rchitecture **M**igration **T**ool (VAMT) is designed to provide an easy and automated process to cold migrate machines between clusters of different architecture types within the same vCenter. In an effort to provide a useful and intuitive tool, the following features have been implemented.
+The **V**Mware **A**rchitecture **M**igration **T**ool (VAMT) is designed to provide an easy and automated process to cold migrate machines between clusters of different architecture types within the same vCenter. In an effort to provide a useful and intuitive tool, the following features have been implemented:
 
  - **Change Window Support** - Ability to schedule migration within a time frame and stop new migrations if the defined time frame is exceeded.
  - **Process Throttling** - Control of how many parallel migrations tasks that vSphere will be asked to execute.
@@ -31,15 +31,13 @@ The **V**Mware **A**rchitecture **M**igration **T**ool (VAMT) is designed to pro
  
 ## Known Limitations
 
-Below is a list of known limitations. This by no means can be a complete list as there may be limitations that have not been considered.  Many of these limitations are a result of focusing on the 80% of use cases to the exclusion of the 20%, aka 80/20 rule.
+Below is a list of known limitations. This by no means can be a complete list as there may be limitations that have not been considered.
 
 - Designed to be executed from Windows only.
-- When migrating a machine with more than one network card, only the first network card will be connected. The user will need to connect the other NICs post migration.
-- Migrating a machine on multiple datastores will result in the VM being moved to one datastore.
-- Rollback of a machine from multiple datastores will result in it being moved back to one datastore on the original location.
-    - Rollback process will only send VM back to its original ESXi host, resource pool, first datastore, first network - not supporting cluster for rollback allows the widest array of supported scenarios. If rollback target needs to be modified, it can be updated in the VM properties/attributes.    
+- Rollback process will send VM back to its original vCenter, ESXi host, resource pool, datastore(s), and network(s). Not supporting cluster for rollback allows the widest array of supported scenarios. If rollback target needs to be modified, it can be updated in the VM properties/attributes.
 - Migrations will start up until the end of the change window and run until complete, possibly past the defined window.
-- Cold migrations initiated by this script are constrained by the limitations and requirements of vSphere.
+- Cold migrations initiated by this script are constrained by the limitations and requirements of vSphere & PowerCLI.
+    - For example, initiating a migration between major vSphere versions (i.e., vSphere 7 -> 8) could have special requirements or limitations that cannot be documented here.
 
 ## Design
 

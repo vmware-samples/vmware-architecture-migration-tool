@@ -1,7 +1,7 @@
-﻿vmname,target_hostpoolcluster,target_portgroup,target_datastore
-candidatevm1,NewCluster,VLAN-16,DatastoreCluster
-candidatevm2,NewCluster,VLAN-16,NFS02
-candidatevm3,resourcePool1,VLAN-16,NFS02
-candidatevm4,OtherCluster,Nested-VLAN-16,NFS01
-candidatevm5,OtherCluster,LS-10.1.102.X/24,NFS02
-candidatevm6,esx01.corp.local,VM Network,NFS01
+﻿vmname,target_vc,target_hostpoolcluster,target_portgroup,target_datastore,target_folder
+candidatevm1,vc1.corp.local,NewCluster,VLAN-16,DatastoreCluster,Migrations
+candidatevm4,vc1.corp.local,OtherCluster,VLAN-10,NFS01,Migrations
+candidatevm6,vc1.corp.local,esx01.corp.local,VM Network,NFS01,Corp/Migrations
+candidatevm2,vc1.corp.local,NewCluster,VLAN-16,NFS02,Migrations
+candidatevm3,vc1.corp.local,resourcePool1,VLAN-16,NFS02,Discovered virtual machine
+candidatevm5,vc1.corp.local,OtherCluster,LS-10.1.102.X/24,NFS02,
