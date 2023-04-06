@@ -862,16 +862,41 @@ function Get-VIObjectByObject {
 
         [Parameter(Mandatory)]
         [ValidateNotNullOrEmpty()]
-        [VMware.VimAutomation.ViCore.Impl.V1.VIServerImpl]$Server
+        [VMware.VimAutomation.ViCore.Impl.V1.VIServerImpl]$Server,
+
+        [Parameter()]
+        [Switch]$simulateMode
     )
 
-    if ($refObject.count -gt 1) {
-        $obj = @()
-        foreach ($element in $refObject) {
-            $obj += Get-VIObjectByVIView -MORef $element.Id -Server $Server
+    if (!!$simulateMode) {
+        #the code in this if block is written to enable the simulator mode feature to function when we are running the script against gvmomi's vcsim.
+        $type = $refObject.Id.Split('-')[0]
+        if ($type -eq "VirtualMachine") {
+            $obj = Get-VM -Name $refObject.Name -Server $Server
+        } elseif ($type -eq "ClusterComputeResource") {
+            $obj = Get-Cluster -Name $refObject.Name -Server $Server
+        } elseif ($type -eq "HostSystem") {
+            $obj = Get-VMHost -Name $refObject.Name -Server $Server
+        } elseif ($type -eq "ResourcePool") {
+            $obj = Get-ResourcePool -Name $refObject.Name -Server $Server
+        } elseif ($type -in @("DistributedVirtualPortgroup","Network")) {
+            $obj = Get-VirtualPortGroup -Name $refObject.Name -Server $Server
+        } elseif ($type -eq "Folder") {
+            $obj = Get-Folder -Type VM -Name $refObject.Name -Server $Server | Select-Object -First 1
+        } elseif ($type -eq "Datastore") {
+            $obj = Get-Datastore -Name $refObject.Name -Server $Server
+        } else {
+            throw "Unsupported object type '$($type)' found on object named '$($refObject.Name)' while using simulate mode."
         }
     } else {
-        $obj = Get-VIObjectByVIView -MORef $refObject.Id -Server $Server
+        if ($refObject.count -gt 1) {
+            $obj = @()
+            foreach ($element in $refObject) {
+                $obj += Get-VIObjectByVIView -MORef $element.Id -Server $Server
+            }
+        } else {
+            $obj = Get-VIObjectByVIView -MORef $refObject.Id -Server $Server
+        }
     }
     return $obj
 }
@@ -1764,14 +1789,20 @@ function Start-MigrateVMJob {
             #$viConn = Connect-ViServer -Server $viConn -Session $viConn.SessionSecret
             $srcViConn = Initialize-VIServer -vCenters $srcViConn.Name -Credential $srcViConn.Credential
             $tgtViConn = Initialize-VIServer -vCenters $tgtViConn.Name -Credential $tgtViConn.Credential
-
-            $vm = Get-VIObjectByVIView -MORef $vm.Id -Server $srcViConn
-            $compute = Get-VIObjectByVIView -MORef $compute.Id -Server $tgtViConn
+            #Write-Host "VM Name: $($vm.Name)"
+            #Write-Warning "VM Name: $($vm.Name)"
+            #Write-Error "VM Name: $($vm.Name)"
+            Write-Output "VM Name: $($vm.Name)"
+            Write-Output "VM ID: $($vm.Id)"
+            Write-Output "VM Ext: $($vm.ExtensionData.MoRef.Type)"
+            $vm = Get-VIObjectByObject -refObject $vm -Server $srcViConn -simulateMode:$vamtSimulateMode
+            Write-Output "Compute Name: $($compute.Name)"
+            $compute = Get-VIObjectByObject -refObject $compute -Server $tgtViConn -simulateMode:$vamtSimulateMode
             #continue to preserve the network type (array vs not) as we're relying on this to determine if we're doing multi nic/datastore migration
-            $network = Get-VIObjectByObject -refObject $network -Server $tgtViConn
-            $storage = Get-VIObjectByObject -refObject $storage -Server $tgtViConn
+            $network = Get-VIObjectByObject -refObject $network -Server $tgtViConn -simulateMode:$vamtSimulateMode
+            $storage = Get-VIObjectByObject -refObject $storage -Server $tgtViConn -simulateMode:$vamtSimulateMode
             if ($null -ne $vmfolder) { #since vmfolder is optional, we must account for it being null.
-                $vmfolder = Get-VIObjectByVIView -MORef $vmfolder.Id -Server $tgtViConn
+                $vmfolder = Get-VIObjectByObject -refObject $vmfolder -Server $tgtViConn -simulateMode:$vamtSimulateMode
             }
             $WhatIf = $test
             $isRetry = $retry
@@ -1795,18 +1826,18 @@ function Start-MigrateVMJob {
             Write-Log -logDefaults $PSDefaultParameterValues -severityLevel Info -logMessage ("Starting {0}migration process on '$($vm.Name)'." -f $retryMessage)
 
             #validate no-one is stepping on our job
-            $currentState = Get-VMStateBasedOnTag -vm $vm -viConn $srcViConn -stateTagsCatName $vamtTagDetails.tagCatName -ignoreTags:$vamtIgnoreTags
+            $currentState = Get-VMStateBasedOnTag -vm $vm -viConn $srcViConn -stateTagsCatName $vamtTagDetails.tagCatName -ignoreTags:$vamtSimulateMode
             $allowedStates = @($vamtTagDetails.readyTagName)
             if ($isRetry) {
                 $allowedStates += $vamtTagDetails.inProgressTagName
             }
-            if ($vamtIgnoreTags) {
+            if ($vamtSimulateMode) {
                 $allowedStates += $vamtTagDetails.ignored
             }
             if ($currentState -in $allowedStates) {
                 #change tag to in progress
                 $null = Confirm-ActiveTasks -vm $vm -viConnection $srcViConn -waitTasks -WhatIf:$WhatIf
-                $null = Set-VMStateTag -vm $vm -tagName $vamtTagDetails.inProgressTagName -stateTagsCatName $vamtTagDetails.tagCatName -WhatIf:$WhatIf -viConn $srcViConn -ignoreTags:$vamtIgnoreTags
+                $null = Set-VMStateTag -vm $vm -tagName $vamtTagDetails.inProgressTagName -stateTagsCatName $vamtTagDetails.tagCatName -WhatIf:$WhatIf -viConn $srcViConn -ignoreTags:$vamtSimulateMode
             } else {
                 throw "Detected invalid tag state '$currentState' on '$vmName'. This is likely the result of a concurent job running on the VM elsewhere."
             }
@@ -2034,7 +2065,7 @@ function Start-MigrateVMJob {
 
             #change tag to complete
             $null = Confirm-ActiveTasks -vm $vm -viConnection $tgtViConn -waitTasks -WhatIf:$WhatIf
-            $null = Set-VMStateTag -vm $vm -tagName $vamtTagDetails.completeTagName -stateTagsCatName $vamtTagDetails.tagCatName -WhatIf:$WhatIf -viConn $tgtViConn -ignoreTags:$vamtIgnoreTags
+            $null = Set-VMStateTag -vm $vm -tagName $vamtTagDetails.completeTagName -stateTagsCatName $vamtTagDetails.tagCatName -WhatIf:$WhatIf -viConn $tgtViConn -ignoreTags:$vamtSimulateMode
 
             Write-Log -severityLevel Info -logMessage "Migration of '$($vm.Name)' completed successfully."
             try { Disconnect-VIServer * -Confirm:$false } catch {}
@@ -2156,18 +2187,18 @@ function Start-RollbackVMJob {
             Write-Log -severityLevel Info -logMessage ("Starting {0}rollback process on '$vmName'." -f $retryMessage)
 
             #validate no-one is stepping on our job
-            $currentState = Get-VMStateBasedOnTag -vm $vm -viConn $srcViConn -stateTagsCatName $vamtTagDetails.tagCatName -ignoreTags:$vamtIgnoreTags
+            $currentState = Get-VMStateBasedOnTag -vm $vm -viConn $srcViConn -stateTagsCatName $vamtTagDetails.tagCatName -ignoreTags:$vamtSimulateMode
             $allowedStates = @($vamtTagDetails.readyToRollbackTagName)
             if ($isRetry) {
                 $allowedStates += $vamtTagDetails.inProgressTagName
             }
-            if ($vamtIgnoreTags) {
+            if ($vamtSimulateMode) {
                 $allowedStates += $vamtTagDetails.ignored
             }
             if ($currentState -in $allowedStates) {
                 #change tag to in progress
                 $null = Confirm-ActiveTasks -vm $vm -viConnection $srcViConn -waitTasks -WhatIf:$WhatIf
-                $null = Set-VMStateTag -vm $vm -tagName $vamtTagDetails.inProgressTagName -stateTagsCatName $vamtTagDetails.tagCatName -WhatIf:$WhatIf -viConn $srcViConn -ignoreTags:$vamtIgnoreTags
+                $null = Set-VMStateTag -vm $vm -tagName $vamtTagDetails.inProgressTagName -stateTagsCatName $vamtTagDetails.tagCatName -WhatIf:$WhatIf -viConn $srcViConn -ignoreTags:$vamtSimulateMode
             } else {
                 throw "Detected invalid tag state '$currentState' on '$vmName'. This is likely the result of a concurent job running on the VM elsewhere."
             }
@@ -2308,7 +2339,7 @@ function Start-RollbackVMJob {
 
             #change tag to complete
             $null = Confirm-ActiveTasks -vm $vm -viConnection $tgtViConn -waitTasks -WhatIf:$WhatIf
-            $null = Set-VMStateTag -vm $vm -tagName $vamtTagDetails.rollbackTagName -stateTagsCatName $vamtTagDetails.tagCatName -WhatIf:$WhatIf -viConn $tgtViConn -ignoreTags:$vamtIgnoreTags
+            $null = Set-VMStateTag -vm $vm -tagName $vamtTagDetails.rollbackTagName -stateTagsCatName $vamtTagDetails.tagCatName -WhatIf:$WhatIf -viConn $tgtViConn -ignoreTags:$vamtSimulateMode
 
             Write-Log -severityLevel Info -logMessage "Rollback of '$($vm.Name)' completed successfully."
             try { Disconnect-VIServer * -Confirm:$false } catch {}
@@ -2398,7 +2429,7 @@ function Start-CleanupVMJob {
             }
 
             #Remove VAMT Tag
-            if (!$vamtIgnoreTags) {
+            if (!$vamtSimulateMode) {
                 Write-Log -severityLevel Info -logMessage "Looking for VAMT tags on '$($vm.Name)'."
                 $tagAssignments = Get-TagAssignment -Category $vamtTagDetails.tagCatName -Entity $vm -Server $viConn
                 if ($tagAssignments.count -gt 0) {
