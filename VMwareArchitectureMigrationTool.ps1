@@ -98,8 +98,8 @@ param(
     [Parameter()] <# do not validate that VMTools is running before starting and do not wait when finished #>
     [Switch]$ignoreVmTools,
 
-    [Parameter()] <#CAUTION: this switch skips validation of the tag states on VMs and puts the script into simulation mode #>
-    [Switch]$ignoreTags,
+    [Parameter()] <#CAUTION: feature requires the use of govmomi/vcsim. This switch skips several validations and puts the script into simulation mode. This should not be enabled against production infrastrucure.#>
+    [Switch]$simulate,
 
     [Parameter()] <# force poweroff if initial clean shutdown times out #>
     [Switch]$forcePowerOff,
@@ -209,13 +209,14 @@ $Script:vamtVcAttrDetails = @{
     migrationTsAttribute = "vamtLastMigrationTime"
     snapshotNameAttribute = "vamtSnapshotName"
 }
+
 #job variables
 $Script:vamtOsShutdownTimeout = $osShutdownTimeout
 $Script:vamtOsPowerOnTimeout = $osPowerOnTimeout
 $Script:vamtForceShutdown = (!!$forcePowerOff -or !!$ignoreVmTools)
 $Script:vamtPowerOnIfRollback = !!$powerOnIfRollback
-$Script:vamtIgnoreVmTools = !!$ignoreVmTools
-$Script:vamtSimulateMode = !!$ignoreTags
+$Script:vamtSimulateMode = !!$simulate
+$Script:vamtIgnoreVmTools = ($vamtSimulateMode -or !!$ignoreVmTools)
 
 #job controller variables
 $jobNotRun = "Not attempted"
@@ -321,6 +322,10 @@ if (![string]::IsNullOrEmpty($vamtSyslogPort)) {
     $PSDefaultParameterValues.Add('Write-Log:syslogPort', $vamtSyslogPort)
 }
 Write-Log -logDefaults $PSDefaultParameterValues -severityLevel Info -logMessage "VAMT Module has been imported and logging defaults have been loaded into module."
+
+if ($vamtSimulateMode) {
+    Write-Log -severityLevel Warn -logMessage "Simulation Mode is enabled. Tag & VMware Tools validations will not be performed."
+}
 
 #validate inputs
 Write-Log -severityLevel Info -logMessage "Beginning inputs file validation."

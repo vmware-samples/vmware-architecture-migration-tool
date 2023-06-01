@@ -34,21 +34,21 @@ function Initialize-VIServer {
     foreach ($vCenter in $vCenters) {
         try {
             if ($null -eq $Credential) {
-                Write-Log -severityLevel Debug -logMessage "No credential for vCenter $vCenter was passed in via input parameter. Starting stored credential retrieval."
+                Write-Log -severityLevel Debug -logMessage "No credential for vCenter '$vCenter' was passed in via input parameter. Starting stored credential retrieval."
                 $cred = Get-StoredCredential -credName $vCenter -credentialDirectory $credentialDirectory
             } elseif (![string]::IsNullOrEmpty($credentialDirectory)) {
-                Write-Log -severityLevel Debug -logMessage "Credential for vCenter $vCenter with Username $($cred.UserName) was passed in via input parameter. Overwriting stored credential."
+                Write-Log -severityLevel Debug -logMessage "Credential for vCenter '$vCenter' with Username '$($Credential.UserName)' was passed in via input parameter. Overwriting stored credential."
                 $cred = Save-Credential -credName $vCenter -cred $Credential -credentialDirectory $credentialDirectory
             } else {
                 $cred = $Credential
             }
-            Write-Log -severityLevel Info -logMessage "Logging in to vCenter $vCenter with User: $($cred.UserName)"
+            Write-Log -severityLevel Info -logMessage "Logging in to vCenter '$vCenter' with User: $($cred.UserName)"
             $connection = Connect-VIServer $vCenter -Credential $cred -ErrorAction Stop
             #extend the vIConnection to contain the credential used to connect it. This can be used later rather than retrieving the credential again if the session needs to be recreated (i.e. in a job)
             $connection | Add-Member NoteProperty -Name Credential -Value $cred -Force
             $connections += $connection
         } catch {
-            Write-Log -severityLevel Error -logMessage "Failed to connect to $vCenter with the following Error:`n`t$($_.Exception.innerexception.message)"
+            Write-Log -severityLevel Error -logMessage "Failed to connect to '$vCenter' with the following Error:`n`t$($_.Exception.innerexception.message)"
             Write-Log -severityLevel Warn -logMessage "In the case of expired/incorrect stored credentials, you can clear the credential file used to connect to vCenter located here: $credentialDirectory"
             Write-Log -severityLevel Warn -logMessage "Cleaning up and exiting the execution."
             try { Disconnect-VIServer * -Confirm:$false } catch {}
@@ -96,7 +96,6 @@ function Invoke-Move {
         [Parameter()]
         [Object]$logDefaults
     )
-
     if (!!$logDefaults) {
         Write-Log -logDefaults $logDefaults -severityLevel Debug -logMessage "Starting 'Invoke-Move'."
     }else {
@@ -109,13 +108,14 @@ function Invoke-Move {
         Server = $Server
         VMotionPriority = "High"
         WhatIf = !!$WhatIf
-        ErrorAction = "Stop"
+        ErrorAction = $PSCmdlet.GetVariableValue("ErrorAction")
+
     }
     if ($null -ne $Destination) {
         if ($Destination.ExtensionData.MoRef.Type -eq "ClusterComputeResource") {
             $moveParameters.Destination = Get-VMHost -Location $compute | Where-Object {$_.ConnectionState -eq "Connected"} | Get-Random
         } elseif ($Destination.ExtensionData.MoRef.Type -eq "ResourcePool") {
-            $tgtCluster = Get-Cluster -Id $compute.ExtensionData.Owner.ToString() -Server $tgtViConn
+            $tgtCluster = Get-Cluster -Id $compute.ExtensionData.Owner.ToString() -Server $Server
             $moveParameters.Destination = Get-VMHost -Location $tgtCluster | Where-Object {$_.ConnectionState -eq "Connected"} | Get-Random
         } else {
             $moveParameters.Destination = $Destination
@@ -145,7 +145,14 @@ function Invoke-Move {
                 $moveParameters.PortGroup = $Network
             }
         }
-        $vm = Move-VM @moveParameters
+
+        $movedVM = Move-VM @moveParameters
+        #Workaround for simulate mode not returning the full VM object
+        if ($null -eq $movedVM.Name) {
+            $vm = Get-VM -Name $vm.Name -Server $Server
+        } else {
+            $vm = $movedVM
+        }
         return $vm
     }
 
@@ -1832,7 +1839,10 @@ function Start-MigrateVMJob {
                 $allowedStates += $vamtTagDetails.inProgressTagName
             }
             if ($vamtSimulateMode) {
+                $errorAction = "Ignore"
                 $allowedStates += $vamtTagDetails.ignored
+            } else {
+                $errorAction = "Stop"
             }
             if ($currentState -in $allowedStates) {
                 #change tag to in progress
@@ -1859,7 +1869,7 @@ function Start-MigrateVMJob {
                 VM = $vm
                 Server = $tgtViConn
                 WhatIf = !!$WhatIf
-                ErrorAction = "Stop"
+                ErrorAction = $errorAction
                 logDefaults = $PSDefaultParameterValues
             }
             #if cross vCenter vMotion, add storage details OR
@@ -1968,7 +1978,7 @@ function Start-MigrateVMJob {
                 if ($vm.PowerState -eq "PoweredOn") {
                     $null = Confirm-ActiveTasks -vm $vm -viConnection $srcViConn -waitTasks
                     Write-Log -severityLevel Info -logMessage "Beginning GuestOS Shutdown on '$($vm.Name)'"
-                    $null = Stop-VMGuest -VM $vm -Confirm:$false
+                    $null = Stop-VMGuest -VM $vm -Confirm:$false -ErrorAction $errorAction
                     $sleepTimer = 5 #seconds
                     while ($vm.PowerState -eq "PoweredOn") {
                         Start-Sleep -Seconds $sleepTimer
@@ -1996,7 +2006,10 @@ function Start-MigrateVMJob {
             $snapshot = Get-Snapshot -VM $vm -Name $snapshotName -Server $srcViConn -ErrorAction SilentlyContinue
             if (!$snapshot) {
                 $null = Confirm-ActiveTasks -vm $vm -viConnection $srcViConn -waitTasks -WhatIf:$WhatIf
-                $snapshot = New-Snapshot -VM $vm -Name $snapshotName -Description $snapshotDescription -Server $srcViConn -Confirm:$false -WhatIf:$WhatIf -ErrorAction Stop
+                $snapshot = New-Snapshot -VM $vm -Name $snapshotName -Description $snapshotDescription -Server $srcViConn -Confirm:$false -WhatIf:$WhatIf -ErrorAction $errorAction
+                if ($null -eq $snapshot) {
+                    $snapshot = Get-Snapshot -VM $vm -Name $snapshotName -Server $srcViConn -ErrorAction SilentlyContinue
+                }
             }
             $null = $vm | Set-Annotation -CustomAttribute $snapshotNameAttribute -Value $snapshot.Name -WhatIf:$WhatIf
             Write-Log -severityLevel Info -logMessage "Successfully created/retrieved pre-migration snapshot on '$($vm.Name)' with name: $snapshotName"
@@ -2013,11 +2026,17 @@ function Start-MigrateVMJob {
                     Confirm = $false
                     Server = $tgtViConn
                     WhatIf = !!$WhatIf
-                    ErrorAction = "Stop"
+                    ErrorAction = $errorAction
                 }
                 Write-Log -severityLevel Info -logMessage "Moving VM '$($vm.Name)' into resource pool '$($compute.Name)'."
                 $null = Confirm-ActiveTasks -vm $vm -viConnection $tgtViConn -waitTasks -WhatIf:$WhatIf
-                $vm = Move-VM @moveParameters
+                $movedVM = Move-VM @moveParameters
+                #Workaround for simulate mode not returning the full VM object
+                if ($null -eq $movedVM.Name) {
+                    $vm = Get-VM -Name $vm.Name -Server $Server
+                } else {
+                    $vm = $movedVM
+                }
             }
 
 
@@ -2025,6 +2044,10 @@ function Start-MigrateVMJob {
             Write-Log -severityLevel Info -logMessage "Migration completed successfully. Powering on '$($vm.Name)'."
             $null = Confirm-ActiveTasks -vm $vm -viConnection $tgtViConn -waitTasks -WhatIf:$WhatIf
             $vm = Start-VM -VM $vm -Server $tgtViConn -Confirm:$false -WhatIf:$WhatIf
+            #Workaround for simulate mode not returning the full VM object
+            if ($null -eq $vm.Name) {
+                $vm = Get-VM -Id $vm.Id -Server $tgtViConn
+            }
             if (!$WhatIf -and !$vamtIgnoreVmTools) {
                 Write-Log -severityLevel Info -logMessage "Waiting for VMware Tools...(Timeout: $vamtOsPowerOnTimeout seconds)"
                 #Adding sleep to avoid VMtools not installed issue
@@ -2077,7 +2100,8 @@ function Start-MigrateVMJob {
             $exception = $_
             $exceptionMessage = $exception.Exception.Message
             $lineNumber = $exception.InvocationInfo.ScriptLineNumber
-            $message = "Caught excecption in migration job on line '$lineNumber':`n$exceptionMessage"
+            $lineContent = $exception.InvocationInfo.Line
+            $message = "Caught excecption in migration job on line '$lineNumber':`n$exceptionMessage`nLine content: $lineContent"
             try {
                 Write-Log -severityLevel Error -logMessage $message -skipConsole
             } catch {
@@ -2351,7 +2375,8 @@ function Start-RollbackVMJob {
             $exception = $_
             $exceptionMessage = $exception.Exception.Message
             $lineNumber = $exception.InvocationInfo.ScriptLineNumber
-            $message = "Caught excecption in rollback job on line '$lineNumber':`n$exceptionMessage"
+            $lineContent = $exception.InvocationInfo.Line
+            $message = "Caught excecption in rollback job on line '$lineNumber':`n$exceptionMessage`nLine content: $lineContent"
             try {
                 Write-Log -severityLevel Error -logMessage $message -skipConsole
             } catch {
@@ -2448,7 +2473,8 @@ function Start-CleanupVMJob {
             $exception = $_
             $exceptionMessage = $exception.Exception.Message
             $lineNumber = $exception.InvocationInfo.ScriptLineNumber
-            $message = "Caught excecption in cleanup job on line '$lineNumber':`n$exceptionMessage"
+            $lineContent = $exception.InvocationInfo.Line
+            $message = "Caught excecption in cleanup job on line '$lineNumber':`n$exceptionMessage`nLine content: $lineContent"
             try {
                 Write-Log -severityLevel Error -logMessage $message -skipConsole
             } catch {
