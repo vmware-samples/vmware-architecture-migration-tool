@@ -147,7 +147,7 @@ function Invoke-Move {
         }
 
         $movedVM = Move-VM @moveParameters
-        #Workaround for simulate mode not returning the full VM object
+        #Workaround for simulate mode (vcsim) not returning the full VM object
         if ($null -eq $movedVM.Name) {
             $vm = Get-VM -Name $vm.Name -Server $Server
         } else {
@@ -1796,16 +1796,9 @@ function Start-MigrateVMJob {
             #$viConn = Connect-ViServer -Server $viConn -Session $viConn.SessionSecret
             $srcViConn = Initialize-VIServer -vCenters $srcViConn.Name -Credential $srcViConn.Credential
             $tgtViConn = Initialize-VIServer -vCenters $tgtViConn.Name -Credential $tgtViConn.Credential
-            #Write-Host "VM Name: $($vm.Name)"
-            #Write-Warning "VM Name: $($vm.Name)"
-            #Write-Error "VM Name: $($vm.Name)"
-            Write-Output "VM Name: $($vm.Name)"
-            Write-Output "VM ID: $($vm.Id)"
-            Write-Output "VM Ext: $($vm.ExtensionData.MoRef.Type)"
+
             $vm = Get-VIObjectByObject -refObject $vm -Server $srcViConn -simulateMode:$vamtSimulateMode
-            Write-Output "Compute Name: $($compute.Name)"
             $compute = Get-VIObjectByObject -refObject $compute -Server $tgtViConn -simulateMode:$vamtSimulateMode
-            #continue to preserve the network type (array vs not) as we're relying on this to determine if we're doing multi nic/datastore migration
             $network = Get-VIObjectByObject -refObject $network -Server $tgtViConn -simulateMode:$vamtSimulateMode
             $storage = Get-VIObjectByObject -refObject $storage -Server $tgtViConn -simulateMode:$vamtSimulateMode
             if ($null -ne $vmfolder) { #since vmfolder is optional, we must account for it being null.
@@ -2031,7 +2024,7 @@ function Start-MigrateVMJob {
                 Write-Log -severityLevel Info -logMessage "Moving VM '$($vm.Name)' into resource pool '$($compute.Name)'."
                 $null = Confirm-ActiveTasks -vm $vm -viConnection $tgtViConn -waitTasks -WhatIf:$WhatIf
                 $movedVM = Move-VM @moveParameters
-                #Workaround for simulate mode not returning the full VM object
+                #Workaround for simulate mode (vcsim) not returning the full VM object
                 if ($null -eq $movedVM.Name) {
                     $vm = Get-VM -Name $vm.Name -Server $Server
                 } else {
@@ -2044,7 +2037,7 @@ function Start-MigrateVMJob {
             Write-Log -severityLevel Info -logMessage "Migration completed successfully. Powering on '$($vm.Name)'."
             $null = Confirm-ActiveTasks -vm $vm -viConnection $tgtViConn -waitTasks -WhatIf:$WhatIf
             $vm = Start-VM -VM $vm -Server $tgtViConn -Confirm:$false -WhatIf:$WhatIf
-            #Workaround for simulate mode not returning the full VM object
+            #Workaround for simulate mode (vcsim) not returning the full VM object
             if ($null -eq $vm.Name) {
                 $vm = Get-VM -Id $vm.Id -Server $tgtViConn
             }
@@ -2182,13 +2175,13 @@ function Start-RollbackVMJob {
             $srcViConn = Initialize-VIServer -vCenters $srcViConn.Name -Credential $srcViConn.Credential
             $tgtViConn = Initialize-VIServer -vCenters $tgtViConn.Name -Credential $tgtViConn.Credential
 
-            $vm = Get-VIObjectByVIView -MORef $vm.Id -Server $srcViConn
+            $vm = Get-VIObjectByObject -refObject $vm -Server $srcViConn -simulateMode:$vamtSimulateMode
             $vmName = $vm.Name
-            $vmhost = Get-VIObjectByVIView -MORef $vmhost.Id -Server $tgtViConn
+            $vmhost = Get-VIObjectByObject -refObject $vmhost -Server $tgtViConn -simulateMode:$vamtSimulateMode
             $respool = Get-VIObjectByVIView -MORef $respool.Id -Server $tgtViConn
-            $network = Get-VIObjectByObject -refObject $network -Server $tgtViConn
-            $vmfolder = Get-VIObjectByVIView -MORef $vmfolder.Id -Server $tgtViConn
-            $datastore = Get-VIObjectByObject -refObject $datastore -Server $tgtViConn
+            $network = Get-VIObjectByObject -refObject $network -Server $tgtViConn -simulateMode:$vamtSimulateMode
+            $vmfolder = Get-VIObjectByObject -refObject $vmfolder -Server $tgtViConn -simulateMode:$vamtSimulateMode
+            $datastore = Get-VIObjectByObject -refObject $datastore -Server $tgtViConn -simulateMode:$vamtSimulateMode
             $snapshotName = $snapshot.Name
             $WhatIf = $test
             $isRetry = $retry
@@ -2217,7 +2210,10 @@ function Start-RollbackVMJob {
                 $allowedStates += $vamtTagDetails.inProgressTagName
             }
             if ($vamtSimulateMode) {
+                $errorAction = "Ignore"
                 $allowedStates += $vamtTagDetails.ignored
+            } else {
+                $errorAction = "Stop"
             }
             if ($currentState -in $allowedStates) {
                 #change tag to in progress
@@ -2243,7 +2239,7 @@ function Start-RollbackVMJob {
                 VM = $vm
                 Server = $tgtViConn
                 WhatIf = $WhatIf
-                ErrorAction = "Stop"
+                ErrorAction = $errorAction
                 logDefaults = $PSDefaultParameterValues
             }
 
@@ -2303,7 +2299,7 @@ function Start-RollbackVMJob {
                 if ($vm.PowerState -eq "PoweredOn") {
                     $null = Confirm-ActiveTasks -vm $vm -viConnection $srcViConn -waitTasks
                     Write-Log -severityLevel Info -logMessage "Beginning PowerOff on '$($vm.Name)'"
-                    $vm = Stop-VM -VM $vm -Server $srcViConn -Confirm:$false
+                    $null = Stop-VM -VM $vm -Server $srcViConn -Confirm:$false -ErrorAction $errorAction
                 } else {
                     Write-Log -severityLevel Info -logMessage "'$($vm.Name)' is already PoweredOff. Continuing."
                 }
@@ -2326,11 +2322,17 @@ function Start-RollbackVMJob {
                         Confirm = $false
                         Server = $tgtViConn
                         WhatIf = $WhatIf
-                        ErrorAction = "Stop"
+                        ErrorAction = $errorAction
                     }
                     Write-Log -severityLevel Info -logMessage "Restoring VM '$($vm.Name)' to resource pool '$($respool.Name)'."
                     $null = Confirm-ActiveTasks -vm $vm -viConnection $tgtViConn -waitTasks -WhatIf:$WhatIf
-                    $vm = Move-VM @moveParameters
+                    $movedVM = Move-VM @moveParameters
+                    #Workaround for simulate mode (vcsim) not returning the full VM object
+                    if ($null -eq $movedVM.Name) {
+                        $vm = Get-VM -Name $vm.Name -Server $Server
+                    } else {
+                        $vm = $movedVM
+                    }
                 }
             }
             #revert snapshot on VM
@@ -2352,6 +2354,10 @@ function Start-RollbackVMJob {
                     #Sometimes vCenter is not ready for the VM to start so we'll wait a little longer
                     Start-Sleep -Seconds 15
                     $vm = Start-VM -VM $vm -Server $tgtViConn -Confirm:$false -WhatIf:$WhatIf
+                }
+                #Workaround for simulate mode (vcsim) not returning the full VM object
+                if ($null -eq $vm.Name) {
+                    $vm = Get-VM -Id $vm.Id -Server $tgtViConn
                 }
                 if (!$WhatIf -and !$vamtIgnoreVmTools) {
                     Write-Log -severityLevel Info -logMessage "Waiting for VMware Tools..."
@@ -2422,7 +2428,7 @@ function Start-CleanupVMJob {
             Import-Module -Name "$vamtWorkingDirectory/VAMT.psm1"
             $viConn = Initialize-VIServer -vCenters $viConn.Name -Credential $viConn.Credential
 
-            $vm = Get-VIObjectByVIView -MORef $vm.Id -Server $viConn
+            $vm = Get-VIObjectByObject -refObject $vm -Server $viConn -simulateMode:$vamtSimulateMode
             $WhatIf = $test
             $vmName = $vm.Name
             $Script:envLogPrefix = $vmName

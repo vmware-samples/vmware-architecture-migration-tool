@@ -98,7 +98,7 @@ param(
     [Parameter()] <# do not validate that VMTools is running before starting and do not wait when finished #>
     [Switch]$ignoreVmTools,
 
-    [Parameter()] <#CAUTION: feature requires the use of govmomi/vcsim. This switch skips several validations and puts the script into simulation mode. This should not be enabled against production infrastrucure.#>
+    [Parameter()] <#CAUTION: this feature requires the use of govmomi/vcsim. This switch skips several validations and puts the script into simulation mode. This should not be enabled against production infrastrucure.#>
     [Switch]$simulate,
 
     [Parameter()] <# force poweroff if initial clean shutdown times out #>
@@ -393,6 +393,12 @@ if ($authenticatedEmail) {
 try { Disconnect-VIServer * -Confirm:$false } catch {}
 $viConnections = $vCenters | ForEach-Object {
     Initialize-VIServer -vCenters $_ -Credential $vcCredentialTable[$_] -credentialDirectory $vamtCredentialDirectory
+}
+#Validate that all connections are to govmomi vcsim instances
+if ($vamtSimulateMode) {
+    if (($viConnections.ExtensionData.Content.About.FullName).count -ne ($viConnections.ExtensionData.Content.About.FullName | Where-Object{$_ -like "*simulator*"}).count) {
+        throw "Simulation mode is enabled but not all vCenters are vcsim instances. Quiting now."
+    }
 }
 #Validate that all Tags and Categories required for the migration exist in all specified vCenters.
 if (!$vamtSimulateMode) {
