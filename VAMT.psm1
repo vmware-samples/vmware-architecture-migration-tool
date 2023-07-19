@@ -113,9 +113,9 @@ function Invoke-Move {
     }
     if ($null -ne $Destination) {
         if ($Destination.ExtensionData.MoRef.Type -eq "ClusterComputeResource") {
-            $moveParameters.Destination = Get-VMHost -Location $compute | Where-Object {$_.ConnectionState -eq "Connected"} | Get-Random
+            $moveParameters.Destination = Get-VMHost -Location $Destination | Where-Object {$_.ConnectionState -eq "Connected"} | Get-Random
         } elseif ($Destination.ExtensionData.MoRef.Type -eq "ResourcePool") {
-            $tgtCluster = Get-Cluster -Id $compute.ExtensionData.Owner.ToString() -Server $Server
+            $tgtCluster = Get-Cluster -Id $Destination.ExtensionData.Owner.ToString() -Server $Server
             $moveParameters.Destination = Get-VMHost -Location $tgtCluster | Where-Object {$_.ConnectionState -eq "Connected"} | Get-Random
         } else {
             $moveParameters.Destination = $Destination
