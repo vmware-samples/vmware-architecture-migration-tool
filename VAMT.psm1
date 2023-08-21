@@ -43,7 +43,7 @@ function Initialize-VIServer {
                 $cred = $Credential
             }
             Write-Log -severityLevel Info -logMessage "Logging in to vCenter $vCenter with User: $($cred.UserName)"
-            $connection = Connect-VIServer $vCenter -Credential $cred -ErrorAction Stop
+            $connection = Connect-VIServer $vCenter -Credential $cred -NotDefault -ErrorAction Stop
             #extend the vIConnection to contain the credential used to connect it. This can be used later rather than retrieving the credential again if the session needs to be recreated (i.e. in a job)
             $connection | Add-Member NoteProperty -Name Credential -Value $cred -Force
             $connections += $connection
@@ -1821,7 +1821,7 @@ function Start-MigrateVMJob {
             $netAdapters = Get-NetworkAdapter -VM $vm | Sort-Object -Property Name
             $currentPgIds = $netAdapters | ForEach-Object {
                 $netName = $_.NetworkName
-                ($vm.ExtensionData | Select-Object -ExpandProperty Network | Where-Object { (Get-View -Id $_.ToString()).Name -eq $netName }).ToString()
+                ($vm.ExtensionData | Select-Object -ExpandProperty Network | Where-Object { (Get-View -Id $_.ToString() -Server $srcViConn).Name -eq $netName }).ToString()
             }
             #Setup Move targets and validate move is needed.
             $moveParameters = @{
@@ -2180,7 +2180,7 @@ function Start-RollbackVMJob {
             $netAdapters = Get-NetworkAdapter -VM $vm | Sort-Object -Property Name
             $currentPgIds = $netAdapters | ForEach-Object {
                 $netName = $_.NetworkName
-                ($vm.ExtensionData | Select-Object -ExpandProperty Network | Where-Object { (Get-View -Id $_.ToString()).Name -eq $netName }).ToString()
+                ($vm.ExtensionData | Select-Object -ExpandProperty Network | Where-Object { (Get-View -Id $_.ToString() -Server $srcViConn).Name -eq $netName }).ToString()
             }
 
             #Setup Move targets and validate move is needed.
