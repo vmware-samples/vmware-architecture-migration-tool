@@ -98,8 +98,8 @@ param(
     [Parameter()] <# do not validate that VMTools is running before starting and do not wait when finished #>
     [Switch]$ignoreVmTools,
 
-    [Parameter()] <#CAUTION: this switch skips validation of the tag states on VMs before executing an action #>
-    [Switch]$ignoreTags,
+    [Parameter()] <#CAUTION: this feature requires the use of govmomi/vcsim. This switch skips several validations and puts the script into simulation mode. This should not be enabled against production infrastrucure.#>
+    [Switch]$simulate,
 
     [Parameter()] <# force poweroff if initial clean shutdown times out #>
     [Switch]$forcePowerOff,
@@ -209,13 +209,14 @@ $Script:vamtVcAttrDetails = @{
     migrationTsAttribute = "vamtLastMigrationTime"
     snapshotNameAttribute = "vamtSnapshotName"
 }
+
 #job variables
 $Script:vamtOsShutdownTimeout = $osShutdownTimeout
 $Script:vamtOsPowerOnTimeout = $osPowerOnTimeout
 $Script:vamtForceShutdown = (!!$forcePowerOff -or !!$ignoreVmTools)
 $Script:vamtPowerOnIfRollback = !!$powerOnIfRollback
-$Script:vamtIgnoreVmTools = !!$ignoreVmTools
-$Script:vamtIgnoreTags = !!$ignoreTags
+$Script:vamtSimulateMode = !!$simulate
+$Script:vamtIgnoreVmTools = ($vamtSimulateMode -or !!$ignoreVmTools)
 
 #job controller variables
 $jobNotRun = "Not attempted"
@@ -322,6 +323,10 @@ if (![string]::IsNullOrEmpty($vamtSyslogPort)) {
 }
 Write-Log -logDefaults $PSDefaultParameterValues -severityLevel Info -logMessage "VAMT Module has been imported and logging defaults have been loaded into module."
 
+if ($vamtSimulateMode) {
+    Write-Log -severityLevel Warn -logMessage "Simulation Mode is enabled. Tag & VMware Tools validations will not be performed."
+}
+
 #validate inputs
 Write-Log -severityLevel Info -logMessage "Beginning inputs file validation."
 try {
@@ -389,8 +394,14 @@ try { Disconnect-VIServer * -Confirm:$false } catch {}
 $viConnections = $vCenters | ForEach-Object {
     Initialize-VIServer -vCenters $_ -Credential $vcCredentialTable[$_] -credentialDirectory $vamtCredentialDirectory
 }
+#Validate that all connections are to govmomi vcsim instances
+if ($vamtSimulateMode) {
+    if (($viConnections.ExtensionData.Content.About.FullName).count -ne ($viConnections.ExtensionData.Content.About.FullName | Where-Object{$_ -like "*simulator*"}).count) {
+        throw "Simulation mode is enabled but not all vCenters are vcsim instances. Quiting now."
+    }
+}
 #Validate that all Tags and Categories required for the migration exist in all specified vCenters.
-if (!$vamtIgnoreTags) {
+if (!$vamtSimulateMode) {
     Confirm-Tags -tagDetails $vamtTagDetails -viConnections $viConnections
 } else {
     Write-Log -severityLevel Warn -logMessage "Skipping tag state validation."
@@ -411,7 +422,7 @@ $validationParams = @{
     inputHeaders = $inputHeaders
     tagDetails = $vamtTagDetails
     viConnections = $viConnections
-    ignoreTags = $vamtIgnoreTags
+    ignoreTags = $vamtSimulateMode
 }
 if ($action -eq "migrate") {
     $migrationTargets = Confirm-MigrationTargets @validationParams -jobStates $jobStates -doNotRunStates $doNotRunStates -ignoreVmTools:$vamtIgnoreVmTools
@@ -486,11 +497,11 @@ if ($action -in @("migrate","rollback")) {
                     if ($job.Error -eq $null) {
                         Write-Log -severityLevel Info "VM move job for '$($_.tgt_vm.Name)' is complete."
                         $_.job_state = $jobComplete
-                        $_.tag_state = Get-VMStateBasedOnTag -vm $_.tgt_vm -viConn $viConnections -stateTagsCatName $vamtTagDetails.tagCatName -ignoreTags:$vamtIgnoreTags
+                        $_.tag_state = Get-VMStateBasedOnTag -vm $_.tgt_vm -viConn $viConnections -stateTagsCatName $vamtTagDetails.tagCatName -ignoreTags:$vamtSimulateMode
                     } else {
                         Write-Log -severityLevel Warn "VM move job for '$($_.tgt_vm.Name)' completed with unhandled errors. Considering it '$jobCompleteWithErrors'. Errors:`n$(($job.Error | ForEach-Object { if (!!$_) {$_.ToString()}}) -join "`n")"
                         $_.job_state = $jobCompleteWithErrors
-                        $_.tag_state = Set-VMStateTag -vm $_.tgt_vm -tagName $vamtTagDetails.completeWithErrorsTagName -stateTagsCatName $vamtTagDetails.tagCatName -WhatIf:(!!$WhatIf) -viConn $viConnections -ignoreTags:$vamtIgnoreTags
+                        $_.tag_state = Set-VMStateTag -vm $_.tgt_vm -tagName $vamtTagDetails.completeWithErrorsTagName -stateTagsCatName $vamtTagDetails.tagCatName -WhatIf:(!!$WhatIf) -viConn $viConnections -ignoreTags:$vamtSimulateMode
                     }
                 } elseif ($job.State -eq $jobFailed) {
                     Write-Log -severityLevel Error "VM move job for '$($_.tgt_vm.Name)' failed with errors:`n$($job.Error.Exception.Message -join "`n")"
@@ -502,11 +513,11 @@ if ($action -in @("migrate","rollback")) {
                         } else {
                             Write-Log -severityLevel Error -logMessage "All retry attempts for '$($_.tgt_vm.Name)' have been exhaused. Setting job state to '$jobFailed'."
                             $_.job_state = $jobFailed
-                            $_.tag_state = Set-VMStateTag -vm $_.tgt_vm -tagName $vamtTagDetails.failedTagName -stateTagsCatName $vamtTagDetails.tagCatName -WhatIf:(!!$WhatIf) -viConn $viConnections -ignoreTags:$vamtIgnoreTags
+                            $_.tag_state = Set-VMStateTag -vm $_.tgt_vm -tagName $vamtTagDetails.failedTagName -stateTagsCatName $vamtTagDetails.tagCatName -WhatIf:(!!$WhatIf) -viConn $viConnections -ignoreTags:$vamtSimulateMode
                         }
                     } else {
                         $_.job_state = $jobFailed
-                        $_.tag_state = Set-VMStateTag -vm $_.tgt_vm -tagName $vamtTagDetails.failedTagName -stateTagsCatName $vamtTagDetails.tagCatName -WhatIf:(!!$WhatIf) -viConn $viConnections -ignoreTags:$vamtIgnoreTags
+                        $_.tag_state = Set-VMStateTag -vm $_.tgt_vm -tagName $vamtTagDetails.failedTagName -stateTagsCatName $vamtTagDetails.tagCatName -WhatIf:(!!$WhatIf) -viConn $viConnections -ignoreTags:$vamtSimulateMode
                     }
                 } elseif ($job.State -eq "NotStarted") {
                     Write-Log -severityLevel Info "VM move job for '$($_.tgt_vm.Name)' is still preparing to run."
@@ -514,7 +525,7 @@ if ($action -in @("migrate","rollback")) {
                     Write-Log -severityLevel Error  "VM move job for '$($_.tgt_vm.Name)' ended with unsupported state $($job.State). Considering this job failed."
                     Write-Log -severityLevel Error -logMessage "Unkown Job State Details:`n$($job | ConvertTo-Json -Depth 4)" -skipConsole -logFileNamePrefix $_.tgt_vm.Name -syslogServer ''
                     $_.job_state = $jobFailed
-                    $_.tag_state = Set-VMStateTag -vm $_.tgt_vm -tagName $vamtTagDetails.failedTagName -stateTagsCatName $vamtTagDetails.tagCatName -WhatIf:(!!$WhatIf) -viConn $viConnections -ignoreTags:$vamtIgnoreTags
+                    $_.tag_state = Set-VMStateTag -vm $_.tgt_vm -tagName $vamtTagDetails.failedTagName -stateTagsCatName $vamtTagDetails.tagCatName -WhatIf:(!!$WhatIf) -viConn $viConnections -ignoreTags:$vamtSimulateMode
                 }
             }
         }
@@ -567,7 +578,7 @@ if ($action -in @("migrate","rollback")) {
                         $_.job_state = $jobFailed
                         $_.job = "Failed waiting for active tasks on VM to complete. Exhausted all $jobRetries retries."
                         Write-Log -severityLevel Error -logMessage "VM ($($vm.Name)) failed with error: $($_.job)"
-                        $_.tag_state = Set-VMStateTag -vm $vm -tagName $vamtTagDetails.failedTagName -stateTagsCatName $vamtTagDetails.tagCatName -WhatIf:(!!$WhatIf) -viConn $viConnections -ignoreTags:$vamtIgnoreTags
+                        $_.tag_state = Set-VMStateTag -vm $vm -tagName $vamtTagDetails.failedTagName -stateTagsCatName $vamtTagDetails.tagCatName -WhatIf:(!!$WhatIf) -viConn $viConnections -ignoreTags:$vamtSimulateMode
                     }
                     return
                 }
@@ -617,11 +628,11 @@ if ($action -in @("migrate","rollback")) {
                     if ($job.Error -eq $null) {
                         Write-Log -severityLevel Info "VM cleanup job for '$($_.clean_vm.Name)' is complete."
                         $_.job_state = $jobComplete
-                        $_.tag_state = Get-VMStateBasedOnTag -vm $_.clean_vm -viConn $viConnections -stateTagsCatName $vamtTagDetails.tagCatName -ignoreTags:$vamtIgnoreTags
+                        $_.tag_state = Get-VMStateBasedOnTag -vm $_.clean_vm -viConn $viConnections -stateTagsCatName $vamtTagDetails.tagCatName -ignoreTags:$vamtSimulateMode
                     } else {
                         Write-Log -severityLevel Warn "VM cleanup job for '$($_.clean_vm.Name)' completed with unhandled errors. Considering it complete with errors."
                         $_.job_state = $jobCompleteWithErrors
-                        $_.tag_state = Get-VMStateBasedOnTag -vm $_.clean_vm -viConn $viConnections -stateTagsCatName $vamtTagDetails.tagCatName -ignoreTags:$vamtIgnoreTags
+                        $_.tag_state = Get-VMStateBasedOnTag -vm $_.clean_vm -viConn $viConnections -stateTagsCatName $vamtTagDetails.tagCatName -ignoreTags:$vamtSimulateMode
                     }
                 } elseif ($job.State -eq $jobFailed) {
                     Write-Log -severityLevel Error "VM cleanup job for '$($_.clean_vm.Name)' failed with errors:`n$($job.Error.Exception.Message -join "`n")"
@@ -633,11 +644,11 @@ if ($action -in @("migrate","rollback")) {
                         } else {
                             Write-Log -severityLevel Error -logMessage "All retry attempts for '$($_.clean_vm.Name)' have been exhaused. Setting job state to '$jobFailed'."
                             $_.job_state = $jobFailed
-                            $_.tag_state = Get-VMStateBasedOnTag -vm $_.clean_vm -viConn $viConnections -stateTagsCatName $vamtTagDetails.tagCatName -ignoreTags:$vamtIgnoreTags
+                            $_.tag_state = Get-VMStateBasedOnTag -vm $_.clean_vm -viConn $viConnections -stateTagsCatName $vamtTagDetails.tagCatName -ignoreTags:$vamtSimulateMode
                         }
                     } else {
                         $_.job_state = $jobFailed
-                        $_.tag_state = Get-VMStateBasedOnTag -vm $_.clean_vm -viConn $viConnections -stateTagsCatName $vamtTagDetails.tagCatName -ignoreTags:$vamtIgnoreTags
+                        $_.tag_state = Get-VMStateBasedOnTag -vm $_.clean_vm -viConn $viConnections -stateTagsCatName $vamtTagDetails.tagCatName -ignoreTags:$vamtSimulateMode
                     }
                 } elseif ($job.State -eq "NotStarted") {
                     Write-Log -severityLevel Info "VM cleanup job for '$($_.clean_vm.Name)' is still preparing to run."
@@ -645,7 +656,7 @@ if ($action -in @("migrate","rollback")) {
                     Write-Log -severityLevel Error  "VM cleanup job for '$($_.clean_vm.Name)' ended with unsupported state $($job.State). Considering this job failed."
                     Write-Log -severityLevel Error -logMessage "Unkown Job State Details:`n$($job | ConvertTo-Json -Depth 4)" -skipConsole -logFileNamePrefix $_.clean_vm.Name -syslogServer ''
                     $_.job_state = $jobFailed
-                    $_.tag_state = Get-VMStateBasedOnTag -vm $_.clean_vm -viConn $viConnections -stateTagsCatName $vamtTagDetails.tagCatName -ignoreTags:$vamtIgnoreTags
+                    $_.tag_state = Get-VMStateBasedOnTag -vm $_.clean_vm -viConn $viConnections -stateTagsCatName $vamtTagDetails.tagCatName -ignoreTags:$vamtSimulateMode
                 }
             }
         }
@@ -677,7 +688,7 @@ if ($action -in @("migrate","rollback")) {
                         $_.job_state = $jobFailed
                         $_.job = "Failed waiting for active tasks on VM to complete. Exhausted all $jobRetries retries."
                         Write-Log -severityLevel Error -logMessage "VM ($($vm.Name)) failed with error: $($_.job)"
-                        $_.tag_state = Get-VMStateBasedOnTag -vm $vm -viConn $viConn -stateTagsCatName $vamtTagDetails.tagCatName -ignoreTags:$vamtIgnoreTags
+                        $_.tag_state = Get-VMStateBasedOnTag -vm $vm -viConn $viConn -stateTagsCatName $vamtTagDetails.tagCatName -ignoreTags:$vamtSimulateMode
                     }
                     return
                 }
