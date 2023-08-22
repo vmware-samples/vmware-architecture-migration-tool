@@ -293,3 +293,38 @@ $options = @{
 }
 .\VMwareArchitectureMigrationTool.ps1 @options
 ```
+
+# Troubleshooting
+
+## Debugging PS Job
+Within the VAMT module there are multiple functions which spin up a PS job to perform the task at hand. 
+```
+Start-MigrateVMJob
+Start-RollbackVMJob
+Start-CleanupVMJob
+```
+If a user/developer finds themself in a scenario where an issue is occuring within one of these jobs and the reason cannot be determined from the job details or job logging, debugging the job may be necessary. To perform this task, here are the basic steps to get you started.
+```
+#Put the following Commandlet at the top of the appropriate job script block withing VAMT module
+Wait-Debugger
+```
+E.X.:
+```
+$migrationJob = Start-Job -ScriptBlock {
+param ($srcViConn,$tgtViConn,$vm,$compute,$network,$vmfolder,$storage,$retry,$test,$scriptVars)
+Wait-Debugger
+try {
+    ...<rest of job script block>...
+```
+Next, execute the VMwareArchitectureMigrationTool.ps1 script as you have been doing effectively reproducing the error you are seeing. 
+> **Note**: It may be advantageous for you to only execuite the script with a single VM target to reduce setup/cleanup complexity.
+
+You should see the error shown below when running the script as `AtBreakpoint` is not a valid job state, this is expected. Now, from the current shell where the script was executed, run the following commands:
+```
+#This command will produce a list of current PSJobs. Note the Id of one that contains the State AtBreakpoint
+Get-Job
+#Get the active PS runspace for the appropriate job
+$runspc = (Get-Job -Id <Id Noted Above>).ChildJobs.Runspace
+#Enter an interactive debug session within the Job
+$runspc | Debug-Runspace
+```
