@@ -42,7 +42,7 @@ function Initialize-VIServer {
             } else {
                 $cred = $Credential
             }
-            Write-Log -severityLevel Info -logMessage "Logging in to vCenter $vCenter with User: $($cred.UserName)"
+            Write-Log -severityLevel Info -logMessage "Logging in to vCenter '$vCenter' with User: $($cred.UserName)"
             $connection = Connect-VIServer $vCenter -Credential $cred -NotDefault -ErrorAction Stop
             #extend the vIConnection to contain the credential used to connect it. This can be used later rather than retrieving the credential again if the session needs to be recreated (i.e. in a job)
             $connection | Add-Member NoteProperty -Name Credential -Value $cred -Force
