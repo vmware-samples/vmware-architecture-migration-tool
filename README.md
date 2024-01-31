@@ -18,7 +18,7 @@ our [Table of Contents](#table-of-contents) below to review the project's docume
 
 ## Purpose 
 
-The **V**Mware **A**rchitecture **M**igration **T**ool (VAMT) is designed to provide an easy and automated process to cold migrate machines between clusters of different architecture types within the same vCenter. In an effort to provide a useful and intuitive tool, the following features have been implemented:
+The **V**Mware **A**rchitecture **M**igration **T**ool (VAMT) is designed to provide an easy and automated process to cold migrate machines between clusters of different architecture types within the same vCenter or across vCenter Server instances. In an effort to provide a useful and intuitive tool, the following features have been implemented:
 
  - **Change Window Support** - Ability to schedule migration within a time frame and stop new migrations if the defined time frame is exceeded.
  - **Process Throttling** - Control of how many parallel migrations tasks that vSphere will be asked to execute.
